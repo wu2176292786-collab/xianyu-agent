@@ -1,0 +1,174 @@
+import Link from "next/link";
+import { ActionCard } from "@/components/action-card";
+import { AgentTickButton } from "@/components/agent-tick-button";
+import { StatCard } from "@/components/stat-card";
+import { TrendChart } from "@/components/trend-chart";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { awaitingSellerReply } from "@/lib/agent/reply";
+import type { ActivityKind } from "@/lib/domain/types";
+import { relativeTime, yuan } from "@/lib/format";
+import { getState } from "@/lib/store";
+
+export const dynamic = "force-dynamic";
+
+const ACTIVITY_STYLE: Record<ActivityKind, { icon: string; label: string }> = {
+  agent: { icon: "🤖", label: "Agent" },
+  human: { icon: "🙋", label: "你" },
+  system: { icon: "🔔", label: "系统" },
+};
+
+function sum(values: number[]) {
+  return values.reduce((acc, v) => acc + v, 0);
+}
+
+function delta(current: number, previous: number) {
+  if (previous === 0) return undefined;
+  return (current - previous) / previous;
+}
+
+export default async function DashboardPage() {
+  const state = await getState();
+
+  const last7 = state.metrics.slice(-7);
+  const prev7 = state.metrics.slice(-14, -7);
+  const views = sum(last7.map((m) => m.views));
+  const prevViews = sum(prev7.map((m) => m.views));
+  const gmv = sum(last7.map((m) => m.gmvCents));
+  const prevGmv = sum(prev7.map((m) => m.gmvCents));
+
+  const onSale = state.listings.filter((l) => l.status === "on_sale");
+  const needsReply = state.conversations.filter(awaitingSellerReply);
+  const pendingShipment = state.orders.filter((o) => o.status === "pending_shipment");
+  const pendingActions = state.actions.filter((a) => a.status === "pending");
+  const recentActivity = [...state.activity]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, 8);
+
+  return (
+    <div className="mx-auto w-full max-w-6xl space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">总览</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Agent 会盯着商品、消息和订单，把该做的事整理成建议交给你确认。
+          </p>
+        </div>
+        <AgentTickButton />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          icon="👀"
+          label="近 7 天曝光"
+          value={views.toLocaleString("zh-CN")}
+          delta={delta(views, prevViews)}
+          hint="较上周"
+        />
+        <StatCard
+          icon="💰"
+          label="近 7 天成交额"
+          value={yuan(gmv)}
+          delta={delta(gmv, prevGmv)}
+          hint="较上周"
+        />
+        <StatCard
+          icon="💬"
+          label="待回复消息"
+          value={String(needsReply.length)}
+          hint={needsReply.length > 0 ? "买家正在等你" : "都回完了"}
+        />
+        <StatCard
+          icon="📦"
+          label="待发货订单"
+          value={String(pendingShipment.length)}
+          hint={`在售 ${onSale.length} 件商品`}
+        />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>近 14 天流量与成交</CardTitle>
+            <CardDescription>
+              曝光是闲鱼最重要的杠杆，擦亮和降价都是在抢曝光。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <TrendChart metrics={state.metrics} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>最近动态</CardTitle>
+            <CardDescription>Agent 和你的每一次操作都会记录在这里。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {recentActivity.length === 0 ? (
+              <p className="text-sm text-muted-foreground">还没有任何操作记录。</p>
+            ) : (
+              recentActivity.map((entry) => (
+                <div key={entry.id} className="flex gap-3 text-sm">
+                  <span aria-hidden className="mt-0.5 leading-none">
+                    {ACTIVITY_STYLE[entry.kind].icon}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="leading-snug">{entry.text}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {ACTIVITY_STYLE[entry.kind].label} · {relativeTime(entry.at)}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              待你确认
+              {pendingActions.length > 0 ? (
+                <Badge variant="secondary">{pendingActions.length}</Badge>
+              ) : null}
+            </CardTitle>
+            <CardDescription>
+              高风险动作永远不会自动执行，必须你点头。
+            </CardDescription>
+          </div>
+          {pendingActions.length > 0 ? (
+            <Button render={<Link href="/queue" />} variant="outline" size="sm">
+              查看全部
+            </Button>
+          ) : null}
+        </CardHeader>
+        <CardContent>
+          {pendingActions.length === 0 ? (
+            <div className="rounded-lg border border-dashed px-6 py-10 text-center">
+              <p className="text-sm font-medium">审批队列是空的</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                点「运行 Agent」让它巡检一遍店铺，有需要处理的事会出现在这里。
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {pendingActions.slice(0, 4).map((action) => (
+                <ActionCard key={action.id} action={action} />
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}

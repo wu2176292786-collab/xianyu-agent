@@ -1,13 +1,31 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockAdapter } from "@/lib/adapters/mock";
-import { actionKey, proposeActions, runTick, toAction } from "@/lib/agent/engine";
+import {
+  actionKey,
+  applyActionWithEdits,
+  proposeActions,
+  runTick,
+  toAction,
+} from "@/lib/agent/engine";
 import { createSeedState } from "@/lib/domain/seed";
-import type { AppState, RuleKind } from "@/lib/domain/types";
+import type { AgentAction, AppState, RuleKind } from "@/lib/domain/types";
 
 const NOW = Date.parse("2026-01-10T12:00:00.000Z");
 
 function kinds(state: AppState, now = NOW): RuleKind[] {
   return proposeActions(state, now).map((p) => p.ruleKind);
+}
+
+/** 从商品类动作里取出商品 id。 */
+function listingIdOf({ payload }: AgentAction): string {
+  switch (payload.type) {
+    case "adjust_price":
+    case "refresh_listing":
+    case "delist_listing":
+      return payload.listingId;
+    default:
+      return "";
+  }
 }
 
 describe("proposeActions", () => {
@@ -81,6 +99,21 @@ describe("proposeActions", () => {
     );
     // O20240001 付款 30 小时，超过 24 小时阈值；O20240002 只过了 8 小时。
     expect(orderIds).toEqual(["O20240001"]);
+  });
+
+  it("建议文案是给人看的，不会漏出英文枚举名", () => {
+    const blob = proposeActions(state, NOW)
+      .map((p) => `${p.title} ${p.reason}`)
+      .join(" ");
+    for (const enumName of [
+      "bargain",
+      "spec_question",
+      "shipping_chase",
+      "availability",
+      "after_sale",
+    ]) {
+      expect(blob).not.toContain(enumName);
+    }
   });
 
   it("零库存但仍在售的商品会被建议下架", () => {
@@ -161,6 +194,89 @@ describe("runTick", () => {
     // C002（问港版/漂移）和 C004（问库存）分别是需要人工确认和高置信度的例子
     expect(queuedReplies.length).toBeGreaterThan(0);
     expect(appliedReplies.length).toBeGreaterThan(0);
+  });
+});
+
+describe("applyActionWithEdits", () => {
+  let state: AppState;
+
+  beforeEach(() => {
+    state = createSeedState(NOW);
+    runTick(state, mockAdapter, NOW);
+  });
+
+  it("人工改价后执行，payload 会被更新", () => {
+    const action = state.actions.find(
+      (a) => a.status === "pending" && a.payload.type === "adjust_price",
+    )!;
+    const listing = state.listings.find(
+      (l) => listingIdOf(action) === l.id,
+    )!;
+
+    const outcome = applyActionWithEdits(
+      state,
+      action,
+      { priceInput: String(listing.floorPriceCents / 100) },
+      mockAdapter,
+      NOW,
+    );
+
+    expect(outcome.ok).toBe(true);
+    expect(action.payload).toMatchObject({ toCents: listing.floorPriceCents });
+    expect(listing.priceCents).toBe(listing.floorPriceCents);
+  });
+
+  it("被拒绝的编辑不会改坏队列里的建议", () => {
+    const action = state.actions.find(
+      (a) => a.status === "pending" && a.payload.type === "adjust_price",
+    )!;
+    const before = structuredClone(action.payload);
+    const listing = state.listings.find((l) => listingIdOf(action) === l.id)!;
+    const priceBefore = listing.priceCents;
+
+    const rejected = applyActionWithEdits(
+      state,
+      action,
+      { priceInput: "1" },
+      mockAdapter,
+      NOW,
+    );
+    expect(rejected.ok).toBe(false);
+    expect(action.payload).toEqual(before);
+    expect(listing.priceCents).toBe(priceBefore);
+
+    // 改坏之后原样通过，仍然应该成功
+    const retried = applyActionWithEdits(state, action, {}, mockAdapter, NOW);
+    expect(retried.ok).toBe(true);
+  });
+
+  it("空回复会被拒绝", () => {
+    const action = state.actions.find(
+      (a) => a.status === "pending" && a.payload.type === "send_reply",
+    )!;
+    const outcome = applyActionWithEdits(
+      state,
+      action,
+      { text: "   " },
+      mockAdapter,
+      NOW,
+    );
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("发货单缺运单号会被拒绝", () => {
+    const action = state.actions.find(
+      (a) => a.status === "pending" && a.payload.type === "ship_order",
+    )!;
+    const outcome = applyActionWithEdits(
+      state,
+      action,
+      { trackingNo: "" },
+      mockAdapter,
+      NOW,
+    );
+    expect(outcome.ok).toBe(false);
+    expect(state.orders.find((o) => o.id === "O20240001")!.status).toBe("pending_shipment");
   });
 });
 

@@ -165,7 +165,7 @@ export function InboxView({
           ) : null}
         </div>
 
-        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        <div className="flex flex-1 flex-col justify-end gap-3 overflow-y-auto px-4 py-4">
           {selected.messages.map((message) => (
             <div
               key={message.id}

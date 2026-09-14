@@ -2,7 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { mockAdapter } from "@/lib/adapters/mock";
-import { applyAction, runTick } from "@/lib/agent/engine";
+import {
+  applyAction,
+  applyActionWithEdits,
+  runTick,
+  type ActionEdits,
+} from "@/lib/agent/engine";
 import { polishReply } from "@/lib/agent/llm";
 import { draftReply } from "@/lib/agent/reply";
 import type { AppState } from "@/lib/domain/types";
@@ -87,13 +92,6 @@ export async function decideAction(
   return response;
 }
 
-export interface ActionEdits {
-  text?: string;
-  priceInput?: string;
-  carrier?: string;
-  trackingNo?: string;
-}
-
 /** 人工修改建议内容后再执行 —— 审批队列里的「编辑后通过」。 */
 export async function approveActionWithEdits(
   actionId: string,
@@ -106,25 +104,7 @@ export async function approveActionWithEdits(
       return { ok: false, message: "这条建议已经处理过了。" };
     }
 
-    const payload = action.payload;
-    if (payload.type === "send_reply" && edits.text !== undefined) {
-      if (!edits.text.trim()) return { ok: false, message: "回复内容不能为空。" };
-      payload.text = edits.text.trim();
-    }
-    if (payload.type === "adjust_price" && edits.priceInput !== undefined) {
-      const cents = parseYuanToCents(edits.priceInput);
-      if (cents === null) return { ok: false, message: "价格格式不对，试试 199 或 199.50。" };
-      payload.toCents = cents;
-    }
-    if (payload.type === "ship_order") {
-      if (edits.carrier !== undefined) payload.carrier = edits.carrier.trim();
-      if (edits.trackingNo !== undefined) payload.trackingNo = edits.trackingNo.trim();
-      if (!payload.carrier || !payload.trackingNo) {
-        return { ok: false, message: "请填写快递公司和运单号。" };
-      }
-    }
-
-    const outcome = applyAction(state, action, mockAdapter, now);
+    const outcome = applyActionWithEdits(state, action, edits, mockAdapter, now);
     if (!outcome.ok) return { ok: false, message: outcome.message };
 
     action.status = "applied";

@@ -83,6 +83,7 @@ describe("classifyIntent", () => {
     ["昨天付的款，什么时候发货呀", "shipping_chase"],
     ["在吗？还有货吗，能自提不", "availability"],
     ["这个是国行还是港版？有划痕吗", "spec_question"],
+    ["键盘是蓝牙版还是有线版？", "spec_question"],
     ["收到货开不了机，我要退款", "after_sale"],
     ["嗯嗯好的", "other"],
   ];

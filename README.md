@@ -5,6 +5,8 @@
 
 高风险的动作永远不会自动执行 —— Agent 负责起草，你负责点头。
 
+![总览](docs/screenshots/dashboard.png)
+
 ## 这是什么
 
 - **总览**：曝光 / 成交额 / 待回复 / 待发货，14 天流量趋势，操作时间线
@@ -13,6 +15,10 @@
 - **商品**：擦亮、改价、下架；每个商品有**底价**，这是 Agent 的红线
 - **订单**：发货时效倒计时，超时订单会被主动备单
 - **自动化**：5 条规则的开关与参数，每条都能单独决定是否需要人工审批
+
+每条建议都写清楚了「为什么」—— 上架多少天、浏览多少次、买家出价多少、超时几小时：
+
+![行动队列](docs/screenshots/queue.png)
 
 ## 快速开始
 
@@ -52,12 +58,24 @@ OPENAI_BASE_URL=https://api.openai.com/v1   # 可选，兼容 OpenAI 协议的�
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎 + 回复起草
+npm run test        # vitest：规则引擎 + 回复起草，44 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
 npm run build       # 生产构建
+npm run test:e2e    # 浏览器冒烟测试（需要先起服务，见下）
 ```
+
+`npm run test:e2e` 用 `playwright-core` 驱动本机已装的 Chrome，把审批、回复、擦亮、
+发货、规则开关和移动端布局跑一遍。它会先点一次「重置示例数据」，所以可以重复运行：
+
+```bash
+npm run build && npm run start &   # 或者 npm run dev
+npm run test:e2e
+CHROME_PATH=/path/to/chrome npm run test:e2e   # Chrome 不在默认位置时
+```
+
+`node scripts/screenshots.mjs` 会重新生成 README 里的截图。
 
 ### 目录结构
 
@@ -80,7 +98,8 @@ src/
     │   ├── reply.ts        意图识别与回复起草
     │   └── llm.ts          可选的 LLM 润色
     └── store.ts            JSON 文件存储
-tests/                      vitest 测试
+tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
+scripts/screenshots.mjs     重新生成 README 截图
 docs/plans/                 执行计划
 ```
 

@@ -11,8 +11,9 @@ import type {
   RiskLevel,
   RuleKind,
 } from "@/lib/domain/types";
-import { daysSince, hoursSince, yuan } from "@/lib/format";
+import { daysSince, hoursSince, parseYuanToCents, yuan } from "@/lib/format";
 import {
+  INTENT_LABEL,
   awaitingSellerReply,
   classifyIntent,
   draftReply,
@@ -162,9 +163,9 @@ function proposeReplies(state: AppState): Proposal[] {
       return {
         ruleId: rule.id,
         ruleKind: rule.kind,
-        title: `回复「${conversation.buyerName}」（${draft.intent === "bargain" ? "议价" : "咨询"}）`,
+        title: `回复「${conversation.buyerName}」（${INTENT_LABEL[draft.intent]}）`,
         reason:
-          `买家消息判定为「${draft.intent}」，置信度 ${(draft.confidence * 100).toFixed(0)}%。` +
+          `买家消息判定为「${INTENT_LABEL[draft.intent]}」，置信度 ${(draft.confidence * 100).toFixed(0)}%。` +
           (draft.counterOfferCents
             ? `还价 ${yuan(draft.counterOfferCents)}，不低于底价。`
             : "") +
@@ -262,6 +263,51 @@ export function applyAction(
         now,
       );
   }
+}
+
+export interface ActionEdits {
+  text?: string;
+  /** 元为单位的价格输入，解析失败会被拒绝 */
+  priceInput?: string;
+  carrier?: string;
+  trackingNo?: string;
+}
+
+/**
+ * 人工改完内容再执行。
+ *
+ * 先在 payload 副本上改，执行成功了才写回 —— 一次被拒绝的编辑
+ * （比如把价格填到底价以下）不能把队列里的建议改坏。
+ */
+export function applyActionWithEdits(
+  state: AppState,
+  action: AgentAction,
+  edits: ActionEdits,
+  adapter: XianyuAdapter,
+  now: number,
+): AdapterResult {
+  const payload = { ...action.payload };
+
+  if (payload.type === "send_reply" && edits.text !== undefined) {
+    if (!edits.text.trim()) return { ok: false, message: "回复内容不能为空。" };
+    payload.text = edits.text.trim();
+  }
+  if (payload.type === "adjust_price" && edits.priceInput !== undefined) {
+    const cents = parseYuanToCents(edits.priceInput);
+    if (cents === null) return { ok: false, message: "价格格式不对，试试 199 或 199.50。" };
+    payload.toCents = cents;
+  }
+  if (payload.type === "ship_order") {
+    if (edits.carrier !== undefined) payload.carrier = edits.carrier.trim();
+    if (edits.trackingNo !== undefined) payload.trackingNo = edits.trackingNo.trim();
+    if (!payload.carrier || !payload.trackingNo) {
+      return { ok: false, message: "请填写快递公司和运单号。" };
+    }
+  }
+
+  const outcome = applyAction(state, { ...action, payload }, adapter, now);
+  if (outcome.ok) action.payload = payload;
+  return outcome;
 }
 
 let actionCounter = 0;

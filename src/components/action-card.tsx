@@ -78,7 +78,7 @@ export function ActionCard({ action }: { action: AgentAction }) {
   return (
     <Card className="gap-3 py-4">
       <CardContent className="space-y-3 px-4">
-        <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 space-y-1">
             <p className="text-sm font-medium">{action.title}</p>
             <p className="text-xs text-muted-foreground">{action.reason}</p>

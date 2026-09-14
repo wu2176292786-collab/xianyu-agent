@@ -1,0 +1,221 @@
+/**
+ * 浏览器冒烟测试：把审批、回复、擦亮、发货、规则开关跑一遍。
+ *
+ * 需要先起服务（`npm run dev` 或 `npm run build && npm run start`），然后：
+ *   npm run test:e2e
+ *
+ * 用 playwright-core 驱动系统里已有的 Chrome，不下载额外的浏览器。
+ */
+import { chromium } from "playwright-core";
+
+const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
+const CHROME =
+  process.env.CHROME_PATH ?? "/usr/bin/google-chrome-stable";
+const results = [];
+let failures = 0;
+
+function check(name, ok, detail = "") {
+  results.push(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+  if (!ok) failures += 1;
+}
+
+const browser = await chromium.launch({
+  executablePath: CHROME,
+  args: ["--no-sandbox", "--disable-dev-shm-usage"],
+});
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+
+const pageErrors = [];
+page.on("pageerror", (err) => pageErrors.push(err.message));
+page.on("console", (msg) => {
+  if (msg.type() === "error" && !msg.text().includes("_rsc")) pageErrors.push(msg.text());
+});
+
+const text = () => page.locator("body").innerText();
+
+/** 等到出现符合预期的 toast，避免读到上一步残留的提示。 */
+async function checkToast(name, pattern, timeout = 8000) {
+  const deadline = Date.now() + timeout;
+  let seen = "";
+  while (Date.now() < deadline) {
+    const all = await page.locator("[data-sonner-toast]").allInnerTexts();
+    const hit = all.find((t) => pattern.test(t));
+    if (hit) {
+      check(name, true, hit.replace(/\n/g, " "));
+      return;
+    }
+    if (all.length > 0) seen = all[all.length - 1];
+    await page.waitForTimeout(200);
+  }
+  check(name, false, `最后看到的提示：${seen.replace(/\n/g, " ") || "(无)"}`);
+}
+
+// ---------- 0. 回到干净的示例数据，保证可重复运行 ----------
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+await page.getByRole("button", { name: "重置示例数据" }).click();
+await page.waitForTimeout(2500);
+await checkToast("重置示例数据", /已重置/);
+
+// ---------- 1. dashboard ----------
+await page.goto(BASE, { waitUntil: "networkidle" });
+const dash = await text();
+check("总览 renders KPI cards", /近 7 天曝光/.test(dash) && /待发货订单/.test(dash));
+check("总览 renders chart", /近 14 天流量与成交/.test(dash) && /每日成交额/.test(dash));
+check("sidebar has 6 nav items", (await page.locator("aside nav a").count()) === 6);
+
+// ---------- 2. run the agent ----------
+await page.getByRole("button", { name: "运行 Agent" }).first().click();
+await page.waitForTimeout(2500);
+await checkToast("运行 Agent shows toast", /Agent 自动执行|没有新建议/);
+const afterTick = await text();
+check("待你确认 now has suggestions", /待你确认/.test(afterTick) && !/审批队列是空的/.test(afterTick));
+
+// ---------- 3. queue ----------
+await page.goto(`${BASE}/queue`, { waitUntil: "networkidle" });
+const pendingCount = await page.locator('[data-slot="card"]').count();
+check("行动队列 lists pending suggestions", pendingCount > 0, `${pendingCount} cards`);
+
+// 3a. edit-then-approve a drafted reply
+const replyCard = page.locator('[data-slot="card"]').filter({ hasText: "回复「" }).first();
+check("有回复类建议", (await replyCard.count()) > 0);
+await replyCard.getByRole("button", { name: "编辑后通过" }).click();
+const textarea = page.locator('[role="dialog"] textarea').first();
+await textarea.waitFor({ state: "visible" });
+const original = await textarea.inputValue();
+check("草稿非空", original.length > 10, `${original.length} chars`);
+await textarea.fill(`${original}\n（这句是我手动加的）`);
+await page.locator('[role="dialog"]').getByRole("button", { name: "确认执行" }).click();
+await page.waitForTimeout(2500);
+await checkToast("编辑后通过 succeeds", /已回复/);
+
+// 3b. floor price guard
+const priceCard = page.locator('[data-slot="card"]').filter({ hasText: "降价" }).first();
+check("有降价建议", (await priceCard.count()) > 0);
+await priceCard.getByRole("button", { name: "编辑后通过" }).click();
+const priceInput = page.locator('[role="dialog"] input').first();
+await priceInput.waitFor({ state: "visible" });
+await priceInput.fill("1");
+await page.locator('[role="dialog"]').getByRole("button", { name: "确认执行" }).click();
+await page.waitForTimeout(2000);
+await checkToast("低于底价被拒绝", /低于底价/);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(500);
+
+// 3c. approve the price drop normally
+const priceCard2 = page.locator('[data-slot="card"]').filter({ hasText: "降价" }).first();
+await priceCard2.getByRole("button", { name: "通过并执行" }).click();
+await page.waitForTimeout(2500);
+await checkToast("降价通过后价格变化", /价格 ¥/);
+
+// 3d. reject one
+const anyCard = page.locator('[data-slot="card"]').first();
+const anyTitle = (await anyCard.innerText()).split("\n")[0];
+await anyCard.getByRole("button", { name: "忽略" }).click();
+await page.waitForTimeout(2000);
+await checkToast("忽略 works", /已忽略/);
+
+await page.getByRole("tab", { name: /已忽略/ }).click();
+await page.waitForTimeout(800);
+check("已忽略 tab lists it", (await text()).includes(anyTitle.slice(0, 8)));
+await page.getByRole("tab", { name: /已执行/ }).click();
+await page.waitForTimeout(800);
+check("已执行 tab non-empty", !/还没有执行过任何动作/.test(await text()));
+
+// ---------- 4. inbox ----------
+await page.goto(`${BASE}/inbox`, { waitUntil: "networkidle" });
+const listButtons = page.locator("div.rounded-lg.border button");
+const convCount = await listButtons.count();
+check("收件箱有会话列表", convCount >= 5, `${convCount} conversations`);
+
+const threadFirst = await page.locator("main").innerText();
+await listButtons.nth(2).click();
+await page.waitForTimeout(800);
+const threadSecond = await page.locator("main").innerText();
+check("切换会话后对话内容变化", threadFirst !== threadSecond);
+
+await page.getByRole("button", { name: "让 Agent 起草" }).click();
+await page.waitForTimeout(2500);
+const composer = page.locator("main textarea").first();
+const drafted = await composer.inputValue();
+check("Agent 起草生成草稿", drafted.length > 10, `${drafted.length} chars`);
+await page.getByRole("button", { name: "发送" }).click();
+await page.waitForTimeout(2500);
+await checkToast("回复发送成功", /已回复/);
+check("消息出现在对话里", (await page.locator("main").innerText()).includes(drafted.slice(0, 12)));
+
+// ---------- 5. listings ----------
+await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
+const rows = await page.locator("tbody tr").count();
+check("商品表有 11 行", rows === 11, `${rows} rows`);
+const firstRefresh = page.locator("tbody tr").first().getByRole("button", { name: "擦亮" });
+await firstRefresh.click();
+await page.waitForTimeout(2200);
+await checkToast("擦亮 succeeds", /已擦亮/);
+const firstRowText = await page.locator("tbody tr").first().innerText();
+check("上次擦亮 变成刚刚", /刚刚/.test(firstRowText));
+
+// price edit
+await page.locator("tbody tr").first().getByRole("button", { name: "改价" }).click();
+const listingPrice = page.locator('[role="dialog"] input').first();
+await listingPrice.waitFor({ state: "visible" });
+await listingPrice.fill("1");
+await page.locator('[role="dialog"]').getByRole("button", { name: "保存" }).click();
+await page.waitForTimeout(1800);
+await checkToast("手动改价也被底价拦住", /低于底价/);
+await page.keyboard.press("Escape");
+
+// ---------- 6. orders ----------
+await page.goto(`${BASE}/orders`, { waitUntil: "networkidle" });
+const shipButtons = page.getByRole("button", { name: "发货" });
+const shipCount = await shipButtons.count();
+check("有待发货订单", shipCount > 0, `${shipCount} shippable`);
+if (shipCount > 0) {
+  await shipButtons.first().click();
+  const trackInput = page.locator('[role="dialog"] input').nth(1);
+  await trackInput.waitFor({ state: "visible" });
+  await trackInput.fill("SF999888777");
+  await page.locator('[role="dialog"]').getByRole("button", { name: "确认发货" }).click();
+  await page.waitForTimeout(2500);
+  await checkToast("发货成功", /已发货：/);
+  check("订单表出现运单号", (await text()).includes("SF999888777"));
+}
+
+// ---------- 7. automations ----------
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+const ruleCards = await page.locator('[data-slot="card"]').count();
+check("自动化页面有规则卡片", ruleCards >= 5, `${ruleCards} cards`);
+await page.locator('[role="switch"]').first().click();
+await page.waitForTimeout(2000);
+await checkToast("规则开关可用", /已关闭「|已开启「/);
+await page.locator('[role="switch"]').first().click();
+await page.waitForTimeout(2000);
+
+// ---------- 8. mobile ----------
+await page.setViewportSize({ width: 420, height: 860 });
+await page.goto(BASE, { waitUntil: "networkidle" });
+await page.waitForTimeout(600);
+check("移动端隐藏侧边栏", !(await page.locator("aside").first().isVisible()));
+const burger = page.getByRole("button", { name: "打开菜单" });
+check("移动端有菜单按钮", await burger.isVisible());
+await burger.click();
+await page.waitForTimeout(900);
+check("抽屉里有导航", (await page.locator('[role="dialog"]').innerText()).includes("行动队列"));
+await page.keyboard.press("Escape");
+await page.waitForTimeout(500);
+const overflow = await page.evaluate(
+  () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+);
+check("移动端无横向溢出", overflow <= 1, `overflow ${overflow}px`);
+
+await page.goto(`${BASE}/inbox`, { waitUntil: "networkidle" });
+const inboxOverflow = await page.evaluate(
+  () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+);
+check("移动端收件箱无横向溢出", inboxOverflow <= 1, `overflow ${inboxOverflow}px`);
+
+check("没有页面级 JS 错误", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
+
+console.log(results.join("\n"));
+console.log(`\n${results.length - failures}/${results.length} passed`);
+await browser.close();
+process.exit(failures > 0 ? 1 : 0);

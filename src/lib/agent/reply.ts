@@ -76,6 +76,11 @@ const KEYWORDS: Array<{ intent: Intent; words: string[] }> = [
       "几年",
       "漂移",
       "中文",
+      "蓝牙",
+      "有线",
+      "双模",
+      "容量",
+      "续航",
     ],
   },
   {

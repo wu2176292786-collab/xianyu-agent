@@ -147,7 +147,12 @@ export default async function DashboardPage() {
             </CardDescription>
           </div>
           {pendingActions.length > 0 ? (
-            <Button render={<Link href="/queue" />} variant="outline" size="sm">
+            <Button
+              render={<Link href="/queue" />}
+              nativeButton={false}
+              variant="outline"
+              size="sm"
+            >
               查看全部
             </Button>
           ) : null}

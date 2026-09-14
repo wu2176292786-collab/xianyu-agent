@@ -1,7 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright-core";
 
-const BASE = "http://127.0.0.1:43117";
+// 默认对着生产构建截图（`npm run start`），开发模式左下角会多一个 Next 调试浮标。
+const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
 await mkdir("docs/screenshots", { recursive: true });
 
 const browser = await chromium.launch({

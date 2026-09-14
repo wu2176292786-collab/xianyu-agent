@@ -19,6 +19,20 @@ function check(name, ok, detail = "") {
   if (!ok) failures += 1;
 }
 
+function report() {
+  console.log(results.join("\n"));
+  console.log(`\n${results.length - failures}/${results.length} passed`);
+}
+
+// 中途崩了也要把已经跑过的结果打出来，否则看不到是哪一步开始坏的。
+for (const event of ["uncaughtException", "unhandledRejection"]) {
+  process.on(event, (err) => {
+    check("未预期的错误", false, String(err?.message ?? err).split("\n")[0]);
+    report();
+    process.exit(1);
+  });
+}
+
 const browser = await chromium.launch({
   executablePath: CHROME,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
@@ -32,6 +46,25 @@ page.on("console", (msg) => {
 });
 
 const text = () => page.locator("body").innerText();
+
+/**
+ * 点到目标出现为止。
+ *
+ * 开发模式下路由是按需编译的，页面可能还没 hydrate 完就被点了，
+ * 这时第一次点击会石沉大海。
+ */
+async function clickUntil(trigger, expected, attempts = 6) {
+  for (let i = 0; i < attempts; i += 1) {
+    await trigger.click();
+    try {
+      await expected.waitFor({ state: "visible", timeout: 2500 });
+      return true;
+    } catch {
+      await page.waitForTimeout(500);
+    }
+  }
+  return false;
+}
 
 /** 等到出现符合预期的 toast，避免读到上一步残留的提示。 */
 async function checkToast(name, pattern, timeout = 8000) {
@@ -52,8 +85,10 @@ async function checkToast(name, pattern, timeout = 8000) {
 
 // ---------- 0. 回到干净的示例数据，保证可重复运行 ----------
 await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
-await page.getByRole("button", { name: "重置示例数据" }).click();
-await page.waitForTimeout(2500);
+await clickUntil(
+  page.getByRole("button", { name: "重置示例数据" }),
+  page.locator("[data-sonner-toast]").first(),
+);
 await checkToast("重置示例数据", /已重置/);
 
 // ---------- 1. dashboard ----------
@@ -64,9 +99,16 @@ check("总览 renders chart", /近 14 天流量与成交/.test(dash) && /每日�
 check("sidebar has 6 nav items", (await page.locator("aside nav a").count()) === 6);
 
 // ---------- 2. run the agent ----------
-await page.getByRole("button", { name: "运行 Agent" }).first().click();
-await page.waitForTimeout(2500);
+await clickUntil(
+  page.getByRole("button", { name: "运行 Agent" }).first(),
+  page.locator("[data-sonner-toast]").first(),
+);
 await checkToast("运行 Agent shows toast", /Agent 自动执行|没有新建议/);
+// router.refresh() 之后页面才会重新渲染，开发模式下会慢一点。
+await page
+  .locator("text=审批队列是空的")
+  .waitFor({ state: "detached", timeout: 10_000 })
+  .catch(() => {});
 const afterTick = await text();
 check("待你确认 now has suggestions", /待你确认/.test(afterTick) && !/审批队列是空的/.test(afterTick));
 
@@ -78,9 +120,11 @@ check("行动队列 lists pending suggestions", pendingCount > 0, `${pendingCoun
 // 3a. edit-then-approve a drafted reply
 const replyCard = page.locator('[data-slot="card"]').filter({ hasText: "回复「" }).first();
 check("有回复类建议", (await replyCard.count()) > 0);
-await replyCard.getByRole("button", { name: "编辑后通过" }).click();
 const textarea = page.locator('[role="dialog"] textarea').first();
-await textarea.waitFor({ state: "visible" });
+check(
+  "编辑对话框能打开",
+  await clickUntil(replyCard.getByRole("button", { name: "编辑后通过" }), textarea),
+);
 const original = await textarea.inputValue();
 check("草稿非空", original.length > 10, `${original.length} chars`);
 await textarea.fill(`${original}\n（这句是我手动加的）`);
@@ -91,9 +135,8 @@ await checkToast("编辑后通过 succeeds", /已回复/);
 // 3b. floor price guard
 const priceCard = page.locator('[data-slot="card"]').filter({ hasText: "降价" }).first();
 check("有降价建议", (await priceCard.count()) > 0);
-await priceCard.getByRole("button", { name: "编辑后通过" }).click();
 const priceInput = page.locator('[role="dialog"] input').first();
-await priceInput.waitFor({ state: "visible" });
+await clickUntil(priceCard.getByRole("button", { name: "编辑后通过" }), priceInput);
 await priceInput.fill("1");
 await page.locator('[role="dialog"]').getByRole("button", { name: "确认执行" }).click();
 await page.waitForTimeout(2000);
@@ -155,9 +198,11 @@ const firstRowText = await page.locator("tbody tr").first().innerText();
 check("上次擦亮 变成刚刚", /刚刚/.test(firstRowText));
 
 // price edit
-await page.locator("tbody tr").first().getByRole("button", { name: "改价" }).click();
 const listingPrice = page.locator('[role="dialog"] input').first();
-await listingPrice.waitFor({ state: "visible" });
+await clickUntil(
+  page.locator("tbody tr").first().getByRole("button", { name: "改价" }),
+  listingPrice,
+);
 await listingPrice.fill("1");
 await page.locator('[role="dialog"]').getByRole("button", { name: "保存" }).click();
 await page.waitForTimeout(1800);
@@ -170,9 +215,8 @@ const shipButtons = page.getByRole("button", { name: "发货" });
 const shipCount = await shipButtons.count();
 check("有待发货订单", shipCount > 0, `${shipCount} shippable`);
 if (shipCount > 0) {
-  await shipButtons.first().click();
   const trackInput = page.locator('[role="dialog"] input').nth(1);
-  await trackInput.waitFor({ state: "visible" });
+  await clickUntil(shipButtons.first(), trackInput);
   await trackInput.fill("SF999888777");
   await page.locator('[role="dialog"]').getByRole("button", { name: "确认发货" }).click();
   await page.waitForTimeout(2500);
@@ -215,7 +259,6 @@ check("移动端收件箱无横向溢出", inboxOverflow <= 1, `overflow ${inbox
 
 check("没有页面级 JS 错误", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 
-console.log(results.join("\n"));
-console.log(`\n${results.length - failures}/${results.length} passed`);
+report();
 await browser.close();
 process.exit(failures > 0 ? 1 : 0);

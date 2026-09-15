@@ -15,10 +15,15 @@
 - **商品**：擦亮、改价、下架；每个商品有**底价**，这是 Agent 的红线
 - **订单**：发货时效倒计时，超时订单会被主动备单
 - **自动化**：5 条规则的开关与参数，每条都能单独决定是否需要人工审批
+- **自动巡检**：不点按钮也会按间隔自己跑，跑完留下记录；执行失败的动作带着原因留在队列里等你重试
 
 每条建议都写清楚了「为什么」—— 上架多少天、浏览多少次、买家出价多少、超时几小时：
 
 ![行动队列](docs/screenshots/queue.png)
+
+规则的开关、参数、是否需要人工审批，以及自动巡检的间隔都在「自动化」页面里改：
+
+![自动化](docs/screenshots/automations.png)
 
 ## 快速开始
 
@@ -31,6 +36,9 @@ npm run dev
 （11 件商品、7 个会话、6 笔订单、14 天流量），存在 `.data/state.json`。
 
 **不需要任何密钥或外部服务。** 点右上角「运行 Agent」就能看到它巡检一遍店铺。
+
+服务端还会每 15 分钟自己跑一轮（间隔和开关在「自动化 → 自动巡检」里改）。
+第一轮永远等你手动触发，之后才交给定时器，所以刚打开时队列是干净的。
 
 在「自动化 → 店铺设置」里可以随时「重置示例数据」。
 
@@ -58,7 +66,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1   # 可选，兼容 OpenAI 协议的�
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎 + 回复起草，44 个用例
+npm run test        # vitest：规则引擎 + 回复起草 + 调度与失败处理，54 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
@@ -81,6 +89,7 @@ CHROME_PATH=/path/to/chrome npm run test:e2e   # Chrome 不在默认位置时
 
 ```
 src/
+├── instrumentation.ts      服务端启动时把后台巡检跑起来
 ├── app/                    页面（Server Components）与 Server Actions
 │   ├── actions.ts          所有写操作的入口
 │   ├── page.tsx            总览
@@ -96,6 +105,8 @@ src/
     ├── agent/
     │   ├── engine.ts       规则引擎：状态 + 时间 → 建议
     │   ├── reply.ts        意图识别与回复起草
+    │   ├── tick.ts         一轮巡检：手动和自动共用同一条路径
+    │   ├── scheduler.ts    后台定时器，按间隔触发巡检
     │   └── llm.ts          可选的 LLM 润色
     └── store.ts            JSON 文件存储
 tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
@@ -103,11 +114,13 @@ scripts/screenshots.mjs     重新生成 README 截图
 docs/plans/                 执行计划
 ```
 
-### 两条写死的安全约束
+### 三条写死的安全约束
 
 1. 自动降价**永远不会低于商品底价**，适配层会二次拦截手动改价；
 2. 售后、需要人工核实的细节咨询、低置信度的草稿**强制进审批队列**，
-   哪怕对应规则被设成了自动执行。
+   哪怕对应规则被设成了自动执行；
+3. 执行失败的动作**不会被悄悄丢掉**，会带着失败原因和尝试次数留在队列里，
+   可以原样重试或者改完再试。
 
 ## 技术栈
 

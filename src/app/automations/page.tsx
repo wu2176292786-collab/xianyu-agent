@@ -1,4 +1,5 @@
 import { AgentTickButton } from "@/components/agent-tick-button";
+import { AutoTickCard } from "@/components/auto-tick-card";
 import { RuleCard } from "@/components/rule-card";
 import { SettingsForm } from "@/components/settings-form";
 import {
@@ -8,15 +9,27 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { nextScheduledTickAt } from "@/lib/agent/engine";
 import { llmStatus } from "@/lib/agent/llm";
+import { nowMs } from "@/lib/format";
 import { getState } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
+
+/** 把「下次巡检」算成一句话，避免客户端和服务端时间对不上。 */
+function describeNextTick(state: Awaited<ReturnType<typeof getState>>, now: number): string {
+  const at = nextScheduledTickAt(state);
+  if (at === null) return "已关闭";
+  const minutes = Math.round((at - now) / 60_000);
+  if (minutes <= 0) return "马上就跑";
+  return `约 ${minutes} 分钟后`;
+}
 
 export default async function AutomationsPage() {
   const state = await getState();
   const llm = llmStatus();
   const enabled = state.rules.filter((r) => r.enabled).length;
+  const nextTickLabel = describeNextTick(state, nowMs());
 
   return (
     <div className="mx-auto w-full max-w-5xl space-y-6">
@@ -29,6 +42,12 @@ export default async function AutomationsPage() {
         </div>
         <AgentTickButton size="sm" />
       </div>
+
+      <AutoTickCard
+        settings={state.settings}
+        runs={state.runs}
+        nextTickLabel={nextTickLabel}
+      />
 
       <div className="space-y-4">
         {state.rules.map((rule) => (

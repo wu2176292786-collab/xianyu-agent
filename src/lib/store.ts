@@ -7,7 +7,7 @@ import type { ActivityEntry, ActivityKind, AppState } from "@/lib/domain/types";
  * v1 用一个 JSON 文件当数据库：零依赖、零凭证，`npm run dev` 就能跑起来。
  * 换成真实数据库时只需要替换本文件的读写实现。
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 interface StoredFile {
   version: number;

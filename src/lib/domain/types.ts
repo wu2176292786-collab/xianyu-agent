@@ -116,7 +116,7 @@ export type ActionPayload =
 
 export type ActionType = ActionPayload["type"];
 
-export type ActionStatus = "pending" | "applied" | "rejected";
+export type ActionStatus = "pending" | "applied" | "rejected" | "failed";
 
 export type RiskLevel = "low" | "medium" | "high";
 
@@ -134,6 +134,23 @@ export interface AgentAction {
   /** 自动执行（规则未开启人工审批）还是人工点了通过 */
   decidedBy?: "agent" | "human";
   payload: ActionPayload;
+  /** 执行失败时平台返回的原因 */
+  failureReason?: string;
+  /** 已经尝试执行的次数，重试会累加 */
+  attempts?: number;
+}
+
+export type TickTrigger = "manual" | "scheduled";
+
+/** 一次巡检的结果摘要，用来回答「它到底有没有在干活」。 */
+export interface AgentRun {
+  id: string;
+  at: string;
+  trigger: TickTrigger;
+  queued: number;
+  applied: number;
+  failed: number;
+  durationMs: number;
 }
 
 export type ActivityKind = "agent" | "human" | "system";
@@ -161,6 +178,10 @@ export interface ShopSettings {
   /** 承诺发货时效（小时） */
   shipWithinHours: number;
   signature: string;
+  /** 关掉之后 Agent 只在你点「运行 Agent」时才动 */
+  autoTickEnabled: boolean;
+  /** 自动巡检间隔（分钟） */
+  autoTickMinutes: number;
 }
 
 export interface AppState {
@@ -172,6 +193,8 @@ export interface AppState {
   actions: AgentAction[];
   activity: ActivityEntry[];
   metrics: DailyMetric[];
+  /** 巡检历史，最近的在前 */
+  runs: AgentRun[];
   lastTickAt?: string;
   seededAt: string;
 }

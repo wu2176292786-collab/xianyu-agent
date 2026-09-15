@@ -3,7 +3,8 @@ import { AgentTickButton } from "@/components/agent-tick-button";
 import { BatchDecideButtons } from "@/components/batch-decide-buttons";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { QueueTabs } from "@/components/queue-tabs";
+import { TabsContent } from "@/components/ui/tabs";
 import type { AgentAction } from "@/lib/domain/types";
 import { relativeTime } from "@/lib/format";
 import { getState } from "@/lib/store";
@@ -31,9 +32,12 @@ function HistoryRow({ action }: { action: AgentAction }) {
   );
 }
 
-export default async function QueuePage() {
+export default async function QueuePage({ searchParams }: PageProps<"/queue">) {
   const state = await getState();
+  const tab = (await searchParams).tab;
+  const initialTab = typeof tab === "string" ? tab : "pending";
   const pending = state.actions.filter((a) => a.status === "pending");
+  const failed = state.actions.filter((a) => a.status === "failed");
   const applied = state.actions.filter((a) => a.status === "applied");
   const rejected = state.actions.filter((a) => a.status === "rejected");
 
@@ -52,12 +56,15 @@ export default async function QueuePage() {
         </div>
       </div>
 
-      <Tabs defaultValue="pending">
-        <TabsList>
-          <TabsTrigger value="pending">待审批（{pending.length}）</TabsTrigger>
-          <TabsTrigger value="applied">已执行（{applied.length}）</TabsTrigger>
-          <TabsTrigger value="rejected">已忽略（{rejected.length}）</TabsTrigger>
-        </TabsList>
+      <QueueTabs
+        initialTab={initialTab}
+        tabs={[
+          { value: "pending", label: `待审批（${pending.length}）` },
+          { value: "failed", label: `执行失败（${failed.length}）` },
+          { value: "applied", label: `已执行（${applied.length}）` },
+          { value: "rejected", label: `已忽略（${rejected.length}）` },
+        ]}
+      >
 
         <TabsContent value="pending" className="mt-4">
           {pending.length === 0 ? (
@@ -72,6 +79,25 @@ export default async function QueuePage() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
               {pending.map((action) => (
+                <ActionCard key={action.id} action={action} />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="failed" className="mt-4">
+          {failed.length === 0 ? (
+            <Card>
+              <CardContent className="px-6 py-12 text-center">
+                <p className="text-sm font-medium">没有执行失败的动作</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  自动执行失败的动作会留在这里带着失败原因，可以改完再试。
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {failed.map((action) => (
                 <ActionCard key={action.id} action={action} />
               ))}
             </div>
@@ -105,7 +131,7 @@ export default async function QueuePage() {
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </QueueTabs>
     </div>
   );
 }

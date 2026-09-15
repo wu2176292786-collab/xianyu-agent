@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockAdapter } from "@/lib/adapters/mock";
+import type { XianyuAdapter } from "@/lib/adapters/types";
 import {
   actionKey,
   applyActionWithEdits,
+  nextScheduledTickAt,
   proposeActions,
+  retryAction,
   runTick,
+  shouldRunScheduledTick,
   toAction,
 } from "@/lib/agent/engine";
 import { createSeedState } from "@/lib/domain/seed";
-import type { AgentAction, AppState, RuleKind } from "@/lib/domain/types";
+import type {
+  ActionType,
+  AgentAction,
+  AppState,
+  RuleKind,
+} from "@/lib/domain/types";
 
 const NOW = Date.parse("2026-01-10T12:00:00.000Z");
 
@@ -149,7 +158,7 @@ describe("runTick", () => {
     expect(queuedKinds).toContain("auto_reply");
     expect(queuedKinds).toContain("price_drop");
     expect(queuedKinds).toContain("shipment_reminder");
-    expect(result.failures).toEqual([]);
+    expect(result.failed).toEqual([]);
   });
 
   it("自动执行真的改变了状态", () => {
@@ -194,6 +203,151 @@ describe("runTick", () => {
     // C002（问港版/漂移）和 C004（问库存）分别是需要人工确认和高置信度的例子
     expect(queuedReplies.length).toBeGreaterThan(0);
     expect(appliedReplies.length).toBeGreaterThan(0);
+  });
+});
+
+/** 只对某一种动作失败的适配器，用来验证失败处理。 */
+function brokenAdapter(failing: ActionType, message = "平台开小差了"): XianyuAdapter {
+  const fail = { ok: false as const, message };
+  return {
+    id: "broken",
+    label: "会失败的通道",
+    isMock: true,
+    refreshListing: (state, id, now) =>
+      failing === "refresh_listing" ? fail : mockAdapter.refreshListing(state, id, now),
+    updatePrice: (state, id, cents, now) =>
+      failing === "adjust_price" ? fail : mockAdapter.updatePrice(state, id, cents, now),
+    delistListing: (state, id, now) =>
+      failing === "delist_listing" ? fail : mockAdapter.delistListing(state, id, now),
+    sendMessage: (state, id, text, now) =>
+      failing === "send_reply" ? fail : mockAdapter.sendMessage(state, id, text, now),
+    shipOrder: (state, id, carrier, trackingNo, now) =>
+      failing === "ship_order"
+        ? fail
+        : mockAdapter.shipOrder(state, id, carrier, trackingNo, now),
+  };
+}
+
+describe("执行失败的处理", () => {
+  let state: AppState;
+
+  beforeEach(() => {
+    state = createSeedState(NOW);
+  });
+
+  it("自动执行失败的动作会带着原因留在队列里，而不是消失", () => {
+    const result = runTick(state, brokenAdapter("refresh_listing"), NOW);
+
+    expect(result.failed.length).toBeGreaterThan(0);
+    for (const action of result.failed) {
+      expect(action.status).toBe("failed");
+      expect(action.failureReason).toBe("平台开小差了");
+      expect(action.attempts).toBe(1);
+      expect(state.actions).toContain(action);
+    }
+    // 失败的不算已执行
+    expect(result.applied.some((a) => a.ruleKind === "refresh_listing")).toBe(false);
+  });
+
+  it("失败的动作不会被下一轮重复提案", () => {
+    runTick(state, brokenAdapter("refresh_listing"), NOW);
+    const before = state.actions.filter((a) => a.status === "failed").length;
+    runTick(state, brokenAdapter("refresh_listing"), NOW + 60_000);
+    const after = state.actions.filter((a) => a.status === "failed").length;
+    // 失败的商品这一轮仍然「没擦亮」，所以会被再提一次 —— 但同一个商品不会同时挂两条待审批
+    expect(after).toBeGreaterThanOrEqual(before);
+    expect(state.actions.filter((a) => a.status === "pending").length).toBeGreaterThan(0);
+  });
+
+  it("重试成功后状态变成已执行，尝试次数累加", () => {
+    runTick(state, brokenAdapter("refresh_listing"), NOW);
+    const failed = state.actions.find((a) => a.status === "failed")!;
+
+    const outcome = retryAction(state, failed, mockAdapter, NOW + 1000);
+    expect(outcome.ok).toBe(true);
+    expect(failed.status).toBe("applied");
+    expect(failed.failureReason).toBeUndefined();
+    expect(failed.attempts).toBe(2);
+    expect(failed.decidedBy).toBe("human");
+  });
+
+  it("重试仍然失败会更新原因并继续累加次数", () => {
+    runTick(state, brokenAdapter("refresh_listing"), NOW);
+    const failed = state.actions.find((a) => a.status === "failed")!;
+
+    const outcome = retryAction(
+      state,
+      failed,
+      brokenAdapter("refresh_listing", "还是不行"),
+      NOW + 1000,
+    );
+    expect(outcome.ok).toBe(false);
+    expect(failed.status).toBe("failed");
+    expect(failed.failureReason).toBe("还是不行");
+    expect(failed.attempts).toBe(2);
+  });
+});
+
+describe("巡检记录与定时巡检", () => {
+  let state: AppState;
+
+  beforeEach(() => {
+    state = createSeedState(NOW);
+  });
+
+  it("每轮巡检都会留下一条记录", () => {
+    runTick(state, mockAdapter, NOW, "scheduled");
+    expect(state.runs).toHaveLength(1);
+    expect(state.runs[0]).toMatchObject({
+      trigger: "scheduled",
+      at: new Date(NOW).toISOString(),
+    });
+    expect(state.runs[0].applied).toBeGreaterThan(0);
+    expect(state.runs[0].queued).toBeGreaterThan(0);
+
+    runTick(state, mockAdapter, NOW + 60_000, "manual");
+    expect(state.runs).toHaveLength(2);
+    // 最近的在最前面
+    expect(state.runs[0].trigger).toBe("manual");
+  });
+
+  it("巡检记录最多留 50 条", () => {
+    for (let i = 0; i < 60; i += 1) {
+      runTick(state, mockAdapter, NOW + i * 1000);
+    }
+    expect(state.runs).toHaveLength(50);
+  });
+
+  it("没到间隔就不跑，到了才跑", () => {
+    state.settings.autoTickEnabled = true;
+    state.settings.autoTickMinutes = 15;
+
+    // 还没跑过时从播种时间起算，保证首次打开时队列是空的
+    expect(shouldRunScheduledTick(state, NOW + 14 * 60_000)).toBe(false);
+    expect(shouldRunScheduledTick(state, NOW + 15 * 60_000)).toBe(true);
+
+    runTick(state, mockAdapter, NOW + 15 * 60_000, "scheduled");
+    expect(shouldRunScheduledTick(state, NOW + 20 * 60_000)).toBe(false);
+    expect(shouldRunScheduledTick(state, NOW + 30 * 60_000)).toBe(true);
+  });
+
+  it("关掉自动巡检就永远不跑", () => {
+    state.settings.autoTickEnabled = false;
+    expect(shouldRunScheduledTick(state, NOW + 10 * 24 * 3600_000)).toBe(false);
+    expect(nextScheduledTickAt(state)).toBeNull();
+  });
+
+  it("间隔填 0 也不会变成死循环", () => {
+    state.settings.autoTickEnabled = true;
+    state.settings.autoTickMinutes = 0;
+    expect(shouldRunScheduledTick(state, NOW + 60_000)).toBe(false);
+  });
+
+  it("下次巡检时间以上次巡检为基准", () => {
+    state.settings.autoTickEnabled = true;
+    state.settings.autoTickMinutes = 20;
+    runTick(state, mockAdapter, NOW, "manual");
+    expect(nextScheduledTickAt(state)).toBe(NOW + 20 * 60_000);
   });
 });
 

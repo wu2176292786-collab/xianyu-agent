@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { approveActionWithEdits, decideAction } from "@/app/actions";
+import { approveActionWithEdits, decideAction, retryFailedAction } from "@/app/actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -64,8 +64,10 @@ export function ActionCard({ action }: { action: AgentAction }) {
   );
   const router = useRouter();
 
-  const editable = action.payload.type !== "refresh_listing" && action.payload.type !== "delist_listing";
+  const editable =
+    action.payload.type !== "refresh_listing" && action.payload.type !== "delist_listing";
   const preview = payloadPreview(action);
+  const failed = action.status === "failed";
 
   const run = (fn: () => Promise<{ ok: boolean; message: string }>) =>
     startTransition(async () => {
@@ -76,7 +78,7 @@ export function ActionCard({ action }: { action: AgentAction }) {
     });
 
   return (
-    <Card className="gap-3 py-4">
+    <Card className={cn("gap-3 py-4", failed && "border-rose-200")}>
       <CardContent className="space-y-3 px-4">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 space-y-1">
@@ -94,13 +96,34 @@ export function ActionCard({ action }: { action: AgentAction }) {
           </div>
         ) : null}
 
+        {failed ? (
+          <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            执行失败：{action.failureReason ?? "未知原因"}
+            {action.attempts && action.attempts > 1 ? `（已尝试 ${action.attempts} 次）` : ""}
+          </p>
+        ) : null}
+
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={pending} onClick={() => run(() => decideAction(action.id, "approve"))}>
-            通过并执行
-          </Button>
+          {failed ? (
+            <Button
+              size="sm"
+              disabled={pending}
+              onClick={() => run(() => retryFailedAction(action.id))}
+            >
+              重试
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              disabled={pending}
+              onClick={() => run(() => decideAction(action.id, "approve"))}
+            >
+              通过并执行
+            </Button>
+          )}
           {editable ? (
             <Button size="sm" variant="outline" disabled={pending} onClick={() => setEditing(true)}>
-              编辑后通过
+              {failed ? "改完再试" : "编辑后通过"}
             </Button>
           ) : null}
           <Button

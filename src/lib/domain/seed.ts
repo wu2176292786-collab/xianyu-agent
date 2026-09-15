@@ -522,6 +522,8 @@ export function createSeedState(now = Date.now()): AppState {
       maxDiscount: 0.12,
       shipWithinHours: 24,
       signature: "—— 老陈｜工作日 22:00 前的订单当天寄出",
+      autoTickEnabled: true,
+      autoTickMinutes: 15,
     },
     listings: buildListings(now, rand),
     conversations: buildConversations(now),
@@ -530,6 +532,7 @@ export function createSeedState(now = Date.now()): AppState {
     actions: [],
     activity: buildActivity(now),
     metrics: buildMetrics(now, rand),
+    runs: [],
     seededAt: new Date(now).toISOString(),
   };
 }

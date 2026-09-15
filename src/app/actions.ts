@@ -5,9 +5,10 @@ import { mockAdapter } from "@/lib/adapters/mock";
 import {
   applyAction,
   applyActionWithEdits,
-  runTick,
+  retryAction,
   type ActionEdits,
 } from "@/lib/agent/engine";
+import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
 import { draftReply } from "@/lib/agent/reply";
 import type { AppState } from "@/lib/domain/types";
@@ -27,33 +28,71 @@ function revalidateAll() {
 
 export async function runAgentTick(): Promise<ActionResponse> {
   const now = Date.now();
-  const summary = await mutateState((state) => {
-    const result = runTick(state, mockAdapter, now);
-    for (const message of result.messages) {
-      logActivity(state, "agent", message, now);
-    }
-    if (result.queued.length > 0) {
-      logActivity(
-        state,
-        "agent",
-        `本轮生成 ${result.queued.length} 条待审批建议，等待你确认。`,
-        now,
-      );
-    }
-    if (result.queued.length === 0 && result.applied.length === 0) {
-      logActivity(state, "agent", "跑了一轮，当前没有需要处理的事情。", now);
-    }
-    return { queued: result.queued.length, applied: result.applied.length };
+  const summary = await mutateState((state) => performTick(state, now, "manual"));
+
+  revalidateAll();
+  return { ok: summary.failed === 0, message: summary.message };
+}
+
+export async function retryFailedAction(actionId: string): Promise<ActionResponse> {
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    const action = state.actions.find((a) => a.id === actionId);
+    if (!action) return { ok: false, message: "找不到这条动作。" };
+    if (action.status !== "failed") return { ok: false, message: "这条动作不是失败状态。" };
+
+    const outcome = retryAction(state, action, mockAdapter, now);
+    logActivity(
+      state,
+      outcome.ok ? "human" : "system",
+      outcome.ok ? `重试成功：${outcome.message}` : `重试仍然失败：${outcome.message}`,
+      now,
+    );
+    return outcome;
   });
 
   revalidateAll();
-  if (summary.queued === 0 && summary.applied === 0) {
-    return { ok: true, message: "Agent 跑完了，暂时没有新建议。" };
+  return response;
+}
+
+export async function setAutoTick(
+  enabled: boolean,
+  minutesInput?: string,
+): Promise<ActionResponse> {
+  const now = Date.now();
+  const minutes = minutesInput === undefined ? undefined : Number(minutesInput);
+  if (
+    minutes !== undefined &&
+    (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60)
+  ) {
+    return { ok: false, message: "巡检间隔请填 1~1440 分钟。" };
   }
-  return {
-    ok: true,
-    message: `Agent 自动执行 ${summary.applied} 项，另有 ${summary.queued} 项待你审批。`,
-  };
+
+  const response = await mutateState((state) => {
+    const changedSwitch = state.settings.autoTickEnabled !== enabled;
+    state.settings.autoTickEnabled = enabled;
+    if (minutes !== undefined) state.settings.autoTickMinutes = minutes;
+
+    if (changedSwitch) {
+      logActivity(
+        state,
+        "human",
+        enabled
+          ? `开启自动巡检，每 ${state.settings.autoTickMinutes} 分钟跑一轮。`
+          : "关闭自动巡检，Agent 只在你点按钮时才动。",
+        now,
+      );
+    }
+    return {
+      ok: true,
+      message: enabled
+        ? `已开启自动巡检，每 ${state.settings.autoTickMinutes} 分钟一轮。`
+        : "已关闭自动巡检。",
+    };
+  });
+
+  revalidateAll();
+  return response;
 }
 
 export async function decideAction(
@@ -64,7 +103,10 @@ export async function decideAction(
   const response = await mutateState((state) => {
     const action = state.actions.find((a) => a.id === actionId);
     if (!action) return { ok: false, message: "找不到这条建议，可能已经处理过了。" };
-    if (action.status !== "pending") {
+    // 执行失败的动作也可以直接忽略，不必先修好再忽略。
+    const canDecide =
+      action.status === "pending" || (decision === "reject" && action.status === "failed");
+    if (!canDecide) {
       return { ok: false, message: "这条建议已经处理过了。" };
     }
 
@@ -100,14 +142,19 @@ export async function approveActionWithEdits(
   const now = Date.now();
   const response = await mutateState((state) => {
     const action = state.actions.find((a) => a.id === actionId);
-    if (!action || action.status !== "pending") {
+    if (!action || (action.status !== "pending" && action.status !== "failed")) {
       return { ok: false, message: "这条建议已经处理过了。" };
     }
 
     const outcome = applyActionWithEdits(state, action, edits, mockAdapter, now);
-    if (!outcome.ok) return { ok: false, message: outcome.message };
+    action.attempts = (action.attempts ?? 0) + 1;
+    if (!outcome.ok) {
+      if (action.status === "failed") action.failureReason = outcome.message;
+      return { ok: false, message: outcome.message };
+    }
 
     action.status = "applied";
+    action.failureReason = undefined;
     action.decidedAt = new Date(now).toISOString();
     action.decidedBy = "human";
     logActivity(state, "human", `${outcome.message}（人工修改后执行）`, now);

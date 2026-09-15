@@ -6,6 +6,8 @@
  *
  * 用 playwright-core 驱动系统里已有的 Chrome，不下载额外的浏览器。
  */
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
@@ -224,15 +226,63 @@ if (shipCount > 0) {
   check("订单表出现运单号", (await text()).includes("SF999888777"));
 }
 
+// ---------- 6.5 执行失败与重试 ----------
+// 模拟通道几乎不会失败，这里直接往状态里塞一条失败动作，验证失败标签页和重试。
+const DATA_FILE = path.join(process.cwd(), ".data", "state.json");
+const stored = JSON.parse(await readFile(DATA_FILE, "utf8"));
+const staleListing = stored.state.listings.find(
+  (l) => l.status === "on_sale" && l.stock > 0,
+);
+stored.state.actions.unshift({
+  id: "ACT-e2e-failed",
+  ruleId: "R-refresh",
+  ruleKind: "refresh_listing",
+  title: `擦亮「${staleListing.title}」`,
+  reason: "e2e 注入的失败动作",
+  risk: "low",
+  status: "failed",
+  createdAt: new Date().toISOString(),
+  payload: { type: "refresh_listing", listingId: staleListing.id },
+  failureReason: "平台返回了 503",
+  attempts: 1,
+});
+await writeFile(DATA_FILE, JSON.stringify(stored, null, 2), "utf8");
+
+await page.goto(BASE, { waitUntil: "networkidle" });
+const dashWithFailure = await text();
+check("总览提示执行失败", /有 1 条动作执行失败/.test(dashWithFailure));
+
+await clickUntil(
+  page.locator('a[href="/queue?tab=failed"]'),
+  page.locator('[data-slot="card"]').filter({ hasText: "平台返回了 503" }).first(),
+);
+const queueBody = await text();
+const failedTabLabel = await page.getByRole("tab").filter({ hasText: "执行失败" }).innerText();
+check("失败动作进入执行失败标签页", /执行失败（1）/.test(failedTabLabel), failedTabLabel);
+check("失败原因展示出来", queueBody.includes("平台返回了 503"));
+
+const failedCard = page.locator('[data-slot="card"]').filter({ hasText: "平台返回了 503" }).first();
+await failedCard.getByRole("button", { name: "重试" }).click();
+await checkToast("重试成功", /已擦亮/);
+await page.goto(`${BASE}/queue`, { waitUntil: "networkidle" });
+check("重试成功后离开失败列表", /执行失败（0）/.test(await text()));
+
 // ---------- 7. automations ----------
 await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
 const ruleCards = await page.locator('[data-slot="card"]').count();
 check("自动化页面有规则卡片", ruleCards >= 5, `${ruleCards} cards`);
-await page.locator('[role="switch"]').first().click();
-await page.waitForTimeout(2000);
+
+const automationsText = await text();
+check("有自动巡检设置卡片", /自动巡检/.test(automationsText) && /巡检间隔/.test(automationsText));
+check("有巡检记录", /最近巡检/.test(automationsText));
+check("展示下次巡检时间", /下次巡检/.test(automationsText));
+// 只点规则卡片上的开关，别误伤自动巡检的开关
+const ruleSwitch = page.locator('[aria-label^="开关 "]').first();
+await ruleSwitch.click();
 await checkToast("规则开关可用", /已关闭「|已开启「/);
-await page.locator('[role="switch"]').first().click();
-await page.waitForTimeout(2000);
+await ruleSwitch.click();
+await page.waitForTimeout(1500);
+check("自动巡检保持开启", await page.locator('[aria-label="自动巡检开关"]').getAttribute("data-checked") !== null);
 
 // ---------- 8. mobile ----------
 await page.setViewportSize({ width: 420, height: 860 });

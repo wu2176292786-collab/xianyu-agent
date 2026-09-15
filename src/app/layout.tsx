@@ -32,6 +32,7 @@ export const dynamic = "force-dynamic";
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   const state = await getState();
   const pending = state.actions.filter((a) => a.status === "pending").length;
+  const failed = state.actions.filter((a) => a.status === "failed").length;
   const needsReply = state.conversations.filter(awaitingSellerReply).length;
   const pendingShipment = state.orders.filter(
     (o) => o.status === "pending_shipment",
@@ -39,7 +40,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
 
   const navItems: NavItem[] = [
     { href: "/", label: "总览", icon: "📊" },
-    { href: "/queue", label: "行动队列", icon: "✅", badge: pending },
+    { href: "/queue", label: "行动队列", icon: "✅", badge: pending + failed },
     { href: "/inbox", label: "消息", icon: "💬", badge: needsReply },
     { href: "/listings", label: "商品", icon: "🏷️" },
     { href: "/orders", label: "订单", icon: "📦", badge: pendingShipment },
@@ -72,6 +73,12 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
               <p>通道：本地模拟（不会操作真实账号）</p>
               <p>回复模型：{llm.configured ? llm.model : "内置模板（未配置 LLM）"}</p>
               <p>
+                自动巡检：
+                {state.settings.autoTickEnabled
+                  ? `每 ${state.settings.autoTickMinutes} 分钟`
+                  : "已关闭"}
+              </p>
+              <p>
                 上次巡检：
                 {state.lastTickAt ? relativeTime(state.lastTickAt) : "还没跑过"}
               </p>
@@ -83,11 +90,13 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
               <MobileNav items={navItems} shopName={state.settings.shopName} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">
-                  {pending > 0
-                    ? `有 ${pending} 条建议等你确认`
-                    : needsReply > 0
-                      ? `有 ${needsReply} 条买家消息待回复`
-                      : "当前没有待办，一切正常"}
+                  {failed > 0
+                    ? `有 ${failed} 条动作执行失败，需要你看一眼`
+                    : pending > 0
+                      ? `有 ${pending} 条建议等你确认`
+                      : needsReply > 0
+                        ? `有 ${needsReply} 条买家消息待回复`
+                        : "当前没有待办，一切正常"}
                 </p>
                 <p className="truncate text-xs text-muted-foreground">
                   {state.lastTickAt

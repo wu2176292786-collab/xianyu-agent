@@ -34,6 +34,8 @@ const settings: ShopSettings = {
   maxDiscount: 0.12,
   shipWithinHours: 24,
   signature: "—— 老陈",
+  autoTickEnabled: false,
+  autoTickMinutes: 15,
 };
 
 function conversation(text: string, overrides: Partial<Conversation> = {}): Conversation {

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ActionCard } from "@/components/action-card";
 import { AgentTickButton } from "@/components/agent-tick-button";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { StatCard } from "@/components/stat-card";
 import { TrendChart } from "@/components/trend-chart";
 import { Badge } from "@/components/ui/badge";
@@ -12,9 +13,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { nextScheduledTickAt } from "@/lib/agent/engine";
 import { awaitingSellerReply } from "@/lib/agent/reply";
 import type { ActivityKind } from "@/lib/domain/types";
-import { relativeTime, yuan } from "@/lib/format";
+import { nowMs, relativeTime, yuan } from "@/lib/format";
 import { getState } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -48,21 +50,54 @@ export default async function DashboardPage() {
   const needsReply = state.conversations.filter(awaitingSellerReply);
   const pendingShipment = state.orders.filter((o) => o.status === "pending_shipment");
   const pendingActions = state.actions.filter((a) => a.status === "pending");
+  const failedActions = state.actions.filter((a) => a.status === "failed");
+  const nextTickAt = nextScheduledTickAt(state);
+  const nextTickMinutes =
+    nextTickAt === null ? null : Math.max(0, Math.round((nextTickAt - nowMs()) / 60_000));
   const recentActivity = [...state.activity]
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     .slice(0, 8);
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
+      <AutoRefresh />
+
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">总览</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Agent 会盯着商品、消息和订单，把该做的事整理成建议交给你确认。
+            {nextTickMinutes === null
+              ? "自动巡检已关闭，需要你手动跑。"
+              : nextTickMinutes === 0
+                ? "下一轮自动巡检马上就跑。"
+                : `下一轮自动巡检约 ${nextTickMinutes} 分钟后。`}
           </p>
         </div>
         <AgentTickButton />
       </div>
+
+      {failedActions.length > 0 ? (
+        <Card className="border-rose-200 bg-rose-50/60">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-1">
+            <div>
+              <p className="text-sm font-medium text-rose-900">
+                有 {failedActions.length} 条动作执行失败
+              </p>
+              <p className="mt-0.5 text-sm text-rose-800">
+                {failedActions[0].title}：{failedActions[0].failureReason ?? "未知原因"}
+              </p>
+            </div>
+            <Button
+              render={<Link href="/queue?tab=failed" />}
+              nativeButton={false}
+              size="sm"
+            >
+              去处理
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard

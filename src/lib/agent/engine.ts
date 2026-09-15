@@ -3,6 +3,7 @@ import type { AdapterResult, XianyuAdapter } from "@/lib/adapters/types";
 import type {
   ActionPayload,
   AgentAction,
+  AgentRun,
   AppState,
   AutomationRule,
   Conversation,
@@ -10,6 +11,7 @@ import type {
   Order,
   RiskLevel,
   RuleKind,
+  TickTrigger,
 } from "@/lib/domain/types";
 import { daysSince, hoursSince, parseYuanToCents, yuan } from "@/lib/format";
 import {
@@ -341,8 +343,10 @@ export function toAction(
 export interface TickResult {
   queued: AgentAction[];
   applied: AgentAction[];
-  failures: string[];
+  /** 自动执行时失败的动作，会留在队列里等人处理 */
+  failed: AgentAction[];
   messages: string[];
+  run: AgentRun;
 }
 
 /** 跑一轮 Agent：产生提案，自动执行低风险项，其余进审批队列。 */
@@ -350,9 +354,25 @@ export function runTick(
   state: AppState,
   adapter: XianyuAdapter,
   now: number,
+  trigger: TickTrigger = "manual",
 ): TickResult {
+  const startedAt = Date.now();
   const proposals = proposeActions(state, now);
-  const result: TickResult = { queued: [], applied: [], failures: [], messages: [] };
+  const result: TickResult = {
+    queued: [],
+    applied: [],
+    failed: [],
+    messages: [],
+    run: {
+      id: `RUN-${now.toString(36)}`,
+      at: new Date(now).toISOString(),
+      trigger,
+      queued: 0,
+      applied: 0,
+      failed: 0,
+      durationMs: 0,
+    },
+  };
 
   for (const proposal of proposals) {
     const rule = state.rules.find((r) => r.id === proposal.ruleId);
@@ -366,13 +386,19 @@ export function runTick(
     }
 
     const action = toAction(proposal, now, "applied", "agent");
+    action.attempts = 1;
     const outcome = applyAction(state, action, adapter, now);
+    state.actions.unshift(action);
+
     if (outcome.ok) {
-      state.actions.unshift(action);
       result.applied.push(action);
       result.messages.push(outcome.message);
     } else {
-      result.failures.push(outcome.message);
+      // 失败的动作留在队列里带着原因，而不是悄悄消失。
+      action.status = "failed";
+      action.failureReason = outcome.message;
+      action.decidedAt = undefined;
+      result.failed.push(action);
     }
   }
 
@@ -385,7 +411,60 @@ export function runTick(
 
   state.actions = state.actions.slice(0, 200);
   state.lastTickAt = new Date(now).toISOString();
+
+  result.run.queued = result.queued.length;
+  result.run.applied = result.applied.length;
+  result.run.failed = result.failed.length;
+  result.run.durationMs = Math.max(0, Date.now() - startedAt);
+  state.runs = [result.run, ...(state.runs ?? [])].slice(0, 50);
+
   return result;
+}
+
+/** 重试一条执行失败的动作。失败了就把新的原因写回去，次数累加。 */
+export function retryAction(
+  state: AppState,
+  action: AgentAction,
+  adapter: XianyuAdapter,
+  now: number,
+): AdapterResult {
+  const outcome = applyAction(state, action, adapter, now);
+  action.attempts = (action.attempts ?? 1) + 1;
+
+  if (outcome.ok) {
+    action.status = "applied";
+    action.failureReason = undefined;
+    action.decidedAt = new Date(now).toISOString();
+    action.decidedBy = "human";
+  } else {
+    action.status = "failed";
+    action.failureReason = outcome.message;
+  }
+  return outcome;
+}
+
+const MINUTE = 60_000;
+
+/**
+ * 距离上次巡检多久了。还没跑过的话从播种时间算起 ——
+ * 这样刚打开应用时队列是空的，第一轮由你自己点，之后才交给定时器。
+ */
+export function msSinceLastTick(state: AppState, now: number): number {
+  const baseline = state.lastTickAt ?? state.seededAt;
+  return now - Date.parse(baseline);
+}
+
+export function nextScheduledTickAt(state: AppState): number | null {
+  if (!state.settings.autoTickEnabled) return null;
+  const baseline = state.lastTickAt ?? state.seededAt;
+  return Date.parse(baseline) + state.settings.autoTickMinutes * MINUTE;
+}
+
+/** 纯函数：现在该不该跑一轮自动巡检。 */
+export function shouldRunScheduledTick(state: AppState, now: number): boolean {
+  if (!state.settings.autoTickEnabled) return false;
+  if (state.settings.autoTickMinutes <= 0) return false;
+  return msSinceLastTick(state, now) >= state.settings.autoTickMinutes * MINUTE;
 }
 
 export function listingFor(state: AppState, id: string): Listing | undefined {

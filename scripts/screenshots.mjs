@@ -35,5 +35,9 @@ await page.goto(`${BASE}/inbox`, { waitUntil: "networkidle" });
 await page.waitForTimeout(1200);
 await page.screenshot({ path: "docs/screenshots/inbox.png" });
 
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+await page.waitForTimeout(1200);
+await page.screenshot({ path: "docs/screenshots/automations.png", fullPage: true });
+
 await browser.close();
 console.log("done");

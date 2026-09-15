@@ -38,7 +38,10 @@ const WRITE_MODES: Array<{ value: WriteMode; hint: string }> = [
 
 const READ_CHANNELS: Array<{ value: ReadChannel; hint: string }> = [
   { value: "mock", hint: "用本地示例数据，每次同步会造一点平台侧的变化。" },
-  { value: "live", hint: "拉你真实店铺的数据。需要先实现登录态管理。" },
+  {
+    value: "live",
+    hint: "拉你真实店铺的商品和会话。先跑 npm run xianyu:login 导入登录态。",
+  },
 ];
 
 export function ChannelCard({

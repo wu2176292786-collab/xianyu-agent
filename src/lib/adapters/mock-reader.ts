@@ -97,17 +97,6 @@ export class MockXianyuReader implements XianyuReader {
 
 export const mockReader = new MockXianyuReader();
 
-/** 真实读通道的占位实现，接上之前明确地失败，而不是悄悄返回空数据。 */
-export class NotImplementedReader implements XianyuReader {
-  readonly id = "live";
-  readonly label = "真实闲鱼账号（未接入）";
-  readonly isMock = false;
-
-  async fetchSnapshot(): Promise<PlatformSnapshot> {
-    throw new Error(
-      "真实读通道还没实现。需要先完成扫码登录与登录态管理，再实现 XianyuReader。",
-    );
-  }
-}
-
-export const liveReader = new NotImplementedReader();
+// 这里原来有个 NotImplementedReader 占位类和 liveReader 导出。真实读通道已经
+// 实现（src/lib/adapters/live/reader.ts），留着一个说「还没实现」的死代码
+// 只会让人误判系统状态，所以删掉了。

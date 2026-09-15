@@ -8,7 +8,19 @@ import { getList, pickNumber, pickString } from "./paths";
  * 而且会变。命中不了就跳过这条记录，绝不硬塞一个猜出来的值进去 ——
  * 一个编出来的价格比没有数据危险得多。
  */
+/**
+ * 列表可能在的位置。
+ *
+ * **裸路径和 `data.` 前缀都要给。** 网关的响应是 `{ret, data}`，而 reader 往
+ * 映射层传的是已经剥掉信封的 `data` 本身 —— 只写 `data.cardList` 的话就变成
+ * 了 `data.data.cardList`，永远取不到，同步会安静地说「没有变化」。
+ * 这个 bug 之前没被测出来，因为测试传的是整个信封。
+ */
 const LIST_PATHS = [
+  "cardList",
+  "items",
+  "itemList",
+  "list",
   "data.cardList",
   "data.items",
   "data.itemList",
@@ -62,6 +74,8 @@ export interface MapResult<T> {
   items: T[];
   /** 没认出来的记录数，界面上要如实显示，不能假装同步很完美 */
   skipped: number;
+  /** 认出来了但故意不收的记录数（比如系统通知会话） */
+  ignored?: number;
 }
 
 export function mapListings(payload: unknown, now: number): MapResult<Listing> {
@@ -85,7 +99,10 @@ export function mapListings(payload: unknown, now: number): MapResult<Listing> {
       continue;
     }
 
-    const stock = pickNumber(record, ITEM_STOCK) ?? 1;
+    const stock = pickNumber(record, ITEM_STOCK);
+    const views = pickNumber(record, ITEM_VIEWS);
+    const wants = pickNumber(record, ITEM_WANTS);
+
     items.push({
       id,
       title,
@@ -96,14 +113,17 @@ export function mapListings(payload: unknown, now: number): MapResult<Listing> {
       floorPriceCents: Math.round((priceCents * 0.9) / 100) * 100,
       floorConfirmed: false,
       costCents: 0,
-      stock,
+      stock: stock ?? 1,
       status: toListingStatus(pickString(record, ITEM_STATUS)),
       createdAt: new Date(now).toISOString(),
       lastRefreshedAt: new Date(now).toISOString(),
-      views7d: pickNumber(record, ITEM_VIEWS) ?? 0,
-      wants: pickNumber(record, ITEM_WANTS) ?? 0,
+      views7d: views ?? 0,
+      wants: wants ?? 0,
       inquiries7d: 0,
       tags: [],
+      // 真实的商品列表接口只回标题、价格、状态，没有热度数据。
+      // 标出来，好让降价规则知道这几个 0 是占位的，不是「真的没人看」。
+      metricsUnknown: views === undefined && wants === undefined,
     });
   }
 
@@ -112,55 +132,81 @@ export function mapListings(payload: unknown, now: number): MapResult<Listing> {
 
 /* ── 会话（mtop.taobao.idlemessage.pc.session.sync）────────────────────── */
 
+/** 同样要给裸路径 —— reader 传进来的是剥掉信封之后的 data 本身。 */
 const SESSION_LIST_PATHS = [
+  "sessions",
+  "sessionList",
   "data.sessions",
   "data.sessionList",
   "data.list",
   "data.result",
-  "data.data",
   "data.modules.sessions",
 ];
 
-const SESSION_ID = ["sessionId", "cid", "id", "sessionInfo.sessionId"];
-const SESSION_BUYER = [
-  "peerUserNick",
-  "targetNick",
-  "userNick",
-  "nick",
-  "sessionInfo.peerUserNick",
-  "user.nick",
-];
-const SESSION_ITEM_ID = ["itemId", "bizId", "sessionInfo.itemId", "item.itemId"];
+const SESSION_ID = ["session.sessionId", "sessionId", "cid", "id"];
+const SESSION_TYPE = ["session.sessionType", "sessionType"];
+const SESSION_ITEM_ID = ["session.itemInfo.itemId", "itemId", "bizId", "item.itemId"];
 const SESSION_LAST_TEXT = [
+  "message.summary.summary",
   "lastMessageContent",
   "lastMsgContent",
   "content",
   "summary",
-  "lastMessage.content",
-  "lastMessage.text",
 ];
 const SESSION_LAST_AT = [
+  "message.summary.ts",
   "lastMessageTime",
   "lastMsgTime",
   "modifyTime",
-  "gmtModified",
-  "lastMessage.time",
 ];
-const SESSION_UNREAD = ["unreadCount", "unread", "redPointCount"];
-const SESSION_LAST_SENDER = ["lastMessageSenderId", "lastSenderId", "senderUserId"];
+const SESSION_UNREAD = ["message.summary.unread", "unreadCount", "unread"];
+
+/** 两侧的身份信息。谁是对方，取决于哪一边的 userId 不是我。 */
+const SESSION_SIDES = [
+  { id: "session.userInfo.userId", nick: ["session.userInfo.nick", "session.userInfo.fishNick"] },
+  {
+    id: "session.ownerInfo.userId",
+    nick: ["session.ownerInfo.nick", "session.ownerInfo.fishNick"],
+  },
+] as const;
+
+/**
+ * 结构变了之后的兜底昵称。
+ *
+ * 只收名字里明确写着「对方」的字段。`nick`、`userNick` 这种不收 ——
+ * 它们既可能是买家也可能是我，认错了就会拿我自己的昵称去标会话。
+ */
+const SESSION_PEER_FALLBACK = ["peerUserNick", "targetNick", "peerNick"];
+
+/**
+ * 只收买家私聊。
+ *
+ * 实测返回里混着一堆系统会话（`sessionType` 23 / 25 / 62 之类，没有 itemId）：
+ * 官方通知、物流提醒、活动推送。把它们收进来，Agent 就会一本正经地给
+ * 「闲鱼小助手」起草回复。单聊是 1，这是网页版自己也在用的过滤条件。
+ */
+const SINGLE_CHAT = 1;
 
 /**
  * 会话列表 → 领域模型。
  *
- * 只能还原出「最后一条消息」这一条记录 —— 会话列表接口本来就只给摘要。
- * 完整的对话要另外调 `mtop.taobao.idlemessage.pc.message.sync`，所以这里
- * **不假装自己拿到了完整聊天记录**：`messages` 里就放这一条，作者按未读数判断。
+ * 只能还原出「最后一条消息」这一条记录 —— 会话列表接口本来就只给摘要
+ * （`message.summary.summary`）。完整对话要另外调
+ * `mtop.taobao.idlemessage.pc.message.sync`，所以这里**不假装拿到了完整聊天记录**。
  *
- * 未读 > 0 说明最后说话的是买家，会话标成待回复；否则算等买家回。
- * 这个判断不完美，但比瞎猜作者要老实 —— 拿不到发送者 id 时它至少不会
- * 把自己发的话当成买家问题，让 Agent 去回复自己。
+ * 谁是买家：实测 `ownerInfo` **不一定是我** —— 有的会话里我在 `userInfo` 那边。
+ * 所以对方只能靠「userId 不等于我的 unb」来认。认不出我自己的 id 时退回
+ * `userInfo`，因为绝大多数会话里它就是对方。
+ *
+ * 最后一条是谁说的：摘要里没有发送者 id，只能按未读数判断 —— 未读 > 0 就是
+ * 买家刚说过话。不完美，但比瞎猜作者老实：至少不会把自己发的话当成买家提问，
+ * 让 Agent 去回复自己。
  */
-export function mapConversations(payload: unknown, now: number): MapResult<Conversation> {
+export function mapConversations(
+  payload: unknown,
+  now: number,
+  selfUserId?: string,
+): MapResult<Conversation> {
   let records: unknown[] = [];
   for (const path of SESSION_LIST_PATHS) {
     records = getList(payload, path);
@@ -169,8 +215,15 @@ export function mapConversations(payload: unknown, now: number): MapResult<Conve
 
   const items: Conversation[] = [];
   let skipped = 0;
+  let ignored = 0;
 
   for (const record of records) {
+    const type = pickNumber(record, SESSION_TYPE);
+    if (type !== undefined && type !== SINGLE_CHAT) {
+      ignored += 1;
+      continue;
+    }
+
     const id = pickString(record, SESSION_ID);
     const text = pickString(record, SESSION_LAST_TEXT);
     // 会话 id 和最后一条消息缺任何一个都没法用：没有 id 无从对齐，
@@ -180,14 +233,20 @@ export function mapConversations(payload: unknown, now: number): MapResult<Conve
       continue;
     }
 
+    const peer =
+      SESSION_SIDES.find((side) => {
+        const sideId = pickString(record, [side.id]);
+        return sideId !== undefined && sideId !== selfUserId;
+      }) ?? SESSION_SIDES[0];
+    const buyerName =
+      pickString(record, [...peer.nick]) ?? pickString(record, SESSION_PEER_FALLBACK) ?? "买家";
+
     const unread = pickNumber(record, SESSION_UNREAD) ?? 0;
-    const senderId = pickString(record, SESSION_LAST_SENDER);
-    const buyerIsLast = unread > 0 || (senderId !== undefined && senderId !== "");
     const at = pickNumber(record, SESSION_LAST_AT);
 
     items.push({
       id,
-      buyerName: pickString(record, SESSION_BUYER) ?? "买家",
+      buyerName,
       buyerEmoji: "🐟",
       listingId: pickString(record, SESSION_ITEM_ID) ?? "",
       status: unread > 0 ? "needs_reply" : "awaiting_buyer",
@@ -196,7 +255,7 @@ export function mapConversations(payload: unknown, now: number): MapResult<Conve
       messages: [
         {
           id: `${id}-last`,
-          author: buyerIsLast ? "buyer" : "seller",
+          author: unread > 0 ? "buyer" : "seller",
           text,
           createdAt: new Date(at && at > 1_000_000_000_000 ? at : now).toISOString(),
         },
@@ -204,7 +263,7 @@ export function mapConversations(payload: unknown, now: number): MapResult<Conve
     });
   }
 
-  return { items, skipped };
+  return { items, skipped, ignored };
 }
 
 const ORDER_ID = ["orderId", "bizOrderId", "id", "mainOrderId"];
@@ -237,7 +296,7 @@ function toOrderStatus(raw: string | undefined): OrderStatus {
 
 export function mapOrders(payload: unknown, now: number): MapResult<Order> {
   let records: unknown[] = [];
-  for (const path of [...LIST_PATHS, "data.orders", "data.orderList"]) {
+  for (const path of [...LIST_PATHS, "orders", "orderList", "data.orders", "data.orderList"]) {
     records = getList(payload, path);
     if (records.length > 0) break;
   }

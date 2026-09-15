@@ -67,6 +67,15 @@ export function mergeSnapshot(
       floorPriceCents: local.floorPriceCents,
       floorConfirmed: local.floorConfirmed,
       costCents: local.costCents,
+      // 这次没拿到热度数据时，保留上一次拿到的，别用占位的 0 把它冲掉
+      ...(remote.metricsUnknown
+        ? {
+            views7d: local.views7d,
+            wants: local.wants,
+            inquiries7d: local.inquiries7d,
+            metricsUnknown: local.metricsUnknown,
+          }
+        : {}),
     };
   });
 

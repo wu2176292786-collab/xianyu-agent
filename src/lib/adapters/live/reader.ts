@@ -1,5 +1,5 @@
 import type { XianyuReader } from "@/lib/adapters/types";
-import type { AppState, PlatformSnapshot } from "@/lib/domain/types";
+import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
 import { credentialStatus } from "./credentials";
 import { type LoginState, loadLoginState } from "./login-state";
 import { mapConversations, mapListings, mapOrders } from "./mapping";
@@ -90,8 +90,13 @@ interface CallOptions {
   /** 注入用，方便测试退避而不用真的等 */
   sleep?: (ms: number) => Promise<void>;
   fetchImpl?: typeof fetch;
-  /** 注入用，省得测试里去读文件 */
-  loginState?: LoginState;
+  /**
+   * 注入用，省得测试里去读文件。
+   *
+   * 显式传 `null` 表示「就是没有登录态」—— 测试必须能表达这个意思，
+   * 否则它会退回去读 `.secrets/`，在开发者自己机器上拿真凭证打真网关。
+   */
+  loginState?: LoginState | null;
 }
 
 const defaultSleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -111,7 +116,8 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
     fetchImpl = fetch,
   } = options;
 
-  const loginState = options.loginState ?? (await loadLoginState());
+  const loginState =
+    options.loginState !== undefined ? options.loginState : await loadLoginState();
   if (!loginState?.cookie) {
     throw new LiveChannelError(
       "还没有导入登录态。用扩展导出后跑 npm run xianyu:login 导入。",
@@ -167,6 +173,16 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
   return last;
 }
 
+/**
+ * 我自己的用户 id，藏在 cookie 的 `unb` 里。
+ *
+ * 两个地方少不了它：商品列表接口要 `userId` 才肯返回（不给就是
+ * `FAIL_BIZ_BAD_REQUEST`），会话列表要靠它认出哪一边是对方。
+ */
+export function selfUserId(cookie: string): string | undefined {
+  return cookie.match(/(?:^|;\s*)unb=([^;]+)/)?.[1];
+}
+
 /** 用新的 Set-Cookie 覆盖同名字段，其余原样保留。 */
 export function mergeCookie(cookie: string, setCookie: string): string {
   const updates = new Map<string, string>();
@@ -210,6 +226,53 @@ function explain(outcome: MtopOutcome, api: string): LiveChannelError {
 }
 
 /**
+ * 每页最多能拿多少件。
+ *
+ * 填 40 会被拒：`FAIL_BIZ_FORBIDDEN::||最大可查看页数或者每页最大可查看商品数超限`。
+ * 20 是网页版自己用的值，实测可以。
+ */
+const LISTINGS_PAGE_SIZE = 20;
+
+/** 翻页上限。真要有人挂着几百件，也不该一次同步把请求打成一片。 */
+const MAX_LISTING_PAGES = 5;
+
+/**
+ * 把商品列表翻完。
+ *
+ * 只拿第一页的话，商品超过 20 件就会静默漏掉后面的 —— 合并逻辑不会删本地
+ * 已有的，但新商品永远进不来，而你从界面上看不出少了东西。
+ */
+async function fetchAllListings(
+  endpoint: Endpoint,
+  userId: string,
+  now: number,
+): Promise<{ items: Listing[]; skipped: number }> {
+  const items: Listing[] = [];
+  let skipped = 0;
+
+  for (let page = 1; page <= MAX_LISTING_PAGES; page += 1) {
+    // userId + pageNumber + pageSize 三个都必填，少一个就是 FAIL_BIZ_BAD_REQUEST
+    const outcome = await callMtop({
+      api: endpoint.api,
+      version: endpoint.version,
+      payload: { userId, pageNumber: page, pageSize: LISTINGS_PAGE_SIZE },
+    });
+    if (outcome.kind !== "ok") throw explain(outcome, endpoint.api);
+
+    const mapped = mapListings(outcome.data, now);
+    items.push(...mapped.items);
+    skipped += mapped.skipped;
+
+    const more = (outcome.data as { nextPage?: unknown } | undefined)?.nextPage;
+    // 没有下一页、或者这一页压根没返回东西，就收工
+    if (more !== true && more !== 1) break;
+    if (mapped.items.length === 0) break;
+  }
+
+  return { items, skipped };
+}
+
+/**
  * 真实读通道。
  *
  * 只读 —— 它没有任何写操作。写操作走 `XianyuAdapter`，而且必须穿过
@@ -231,25 +294,27 @@ export class LiveXianyuReader implements XianyuReader {
       throw new LiveChannelError("没有配置商品列表接口。", "not_configured");
     }
 
-    const listingsOutcome = await callMtop({
-      api: endpoints.listings.api,
-      version: endpoints.listings.version,
-      payload: { pageNumber: 1, pageSize: 40 },
-    });
-    if (listingsOutcome.kind !== "ok") throw explain(listingsOutcome, endpoints.listings.api);
+    const loginState = await loadLoginState();
+    const userId = loginState?.cookie ? selfUserId(loginState.cookie) : undefined;
+    if (!userId) {
+      throw new LiveChannelError(
+        "cookie 里没有 unb（用户 id），商品列表接口不会返回数据。重新导出一次登录态。",
+        "not_configured",
+      );
+    }
 
-    const listings = mapListings(listingsOutcome.data, now);
+    const listings = await fetchAllListings(endpoints.listings, userId, now);
 
-    // 会话列表。sessionTypes 1,19 是网页版自己带的（单聊 + 系统会话）。
+    // 会话列表只认 fetchNum 这一个必填参数；系统会话在映射层按 sessionType 过滤
     let conversations = state.conversations;
     if (endpoints.conversations) {
       const outcome = await callMtop({
         api: endpoints.conversations.api,
         version: endpoints.conversations.version,
-        payload: { sessionTypes: "1,19", pageSize: 30 },
+        payload: { fetchNum: 30 },
       });
       if (outcome.kind !== "ok") throw explain(outcome, endpoints.conversations.api);
-      const mapped = mapConversations(outcome.data, now);
+      const mapped = mapConversations(outcome.data, now, userId);
       if (mapped.items.length > 0) conversations = mapped.items;
     }
 

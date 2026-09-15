@@ -116,11 +116,18 @@ export function ListingsTable({ listings }: { listings: Listing[] }) {
                   )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{listing.stock}</TableCell>
+                {/* 平台没给热度数据时显示「—」，不显示 0 —— 0 会被当成「没人看」 */}
                 <TableCell className="text-right tabular-nums">
-                  {listing.views7d.toLocaleString("zh-CN")}
+                  {listing.metricsUnknown ? (
+                    <span className="text-muted-foreground" title="平台这次没返回浏览量">
+                      —
+                    </span>
+                  ) : (
+                    listing.views7d.toLocaleString("zh-CN")
+                  )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">
-                  {listing.wants} / {listing.inquiries7d}
+                  {listing.metricsUnknown ? "—" : `${listing.wants} / ${listing.inquiries7d}`}
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">
                   {relativeTime(listing.lastRefreshedAt)}

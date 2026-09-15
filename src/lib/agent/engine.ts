@@ -93,6 +93,9 @@ function proposePriceDrop(state: AppState, now: number): Proposal[] {
         l.stock > 0 &&
         // 底价没人确认过就不碰 —— 拿一个估出来的底价去降价等于没有底价
         l.floorConfirmed &&
+        // 浏览量根本没拿到时，那个 0 是占位的，不是「没人看」。
+        // 拿一个从来没拿到过的数字去降价，比不降危险得多。
+        !l.metricsUnknown &&
         l.priceCents > l.floorPriceCents &&
         daysSince(l.createdAt, now) >= staleDays &&
         l.views7d <= maxViews,

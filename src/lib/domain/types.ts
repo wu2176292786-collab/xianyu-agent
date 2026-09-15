@@ -31,6 +31,14 @@ export interface Listing {
   wants: number;
   inquiries7d: number;
   tags: string[];
+  /**
+   * 平台这次没给浏览 / 想要 / 库存。
+   *
+   * 真实商品列表接口只回标题、价格和状态，没有热度数据。这时 `views7d` 之类
+   * 只是占位的 0，**不能当成「浏览量很低」** —— 否则滞销降价规则会拿一个我们
+   * 从来没拿到过的数字去降你的价。带这个标记的商品，降价规则会直接绕开。
+   */
+  metricsUnknown?: boolean;
 }
 
 export type Intent =

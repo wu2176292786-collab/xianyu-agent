@@ -260,7 +260,11 @@ describe("callMtop", () => {
 
   it("没导入登录态时直接抛出未配置错误", async () => {
     delete process.env.XIANYU_COOKIE;
-    await expect(callMtop({ api: "mtop.x" })).rejects.toThrow("还没有导入登录态");
+    // 必须显式说「没有登录态」。不然它会退回去读 .secrets/，
+    // 在导入过真凭证的机器上就变成拿真账号打真网关了。
+    await expect(callMtop({ api: "mtop.x", loginState: null })).rejects.toThrow(
+      "还没有导入登录态",
+    );
   });
 
   it("按浏览器的样子发：POST + 表单体里的 data", async () => {

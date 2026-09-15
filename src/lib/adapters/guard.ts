@@ -11,7 +11,8 @@ export const WRITE_MODE_LABEL: Record<AppState["channel"]["write"], string> = {
 
 export const READ_CHANNEL_LABEL: Record<AppState["channel"]["read"], string> = {
   mock: "本地模拟数据",
-  live: "真实闲鱼账号（未接入）",
+  // 只读：能拉商品和会话，一个字都写不回去
+  live: "真实闲鱼账号（只读）",
 };
 
 export interface WriteBudget {

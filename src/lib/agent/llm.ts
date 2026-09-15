@@ -84,16 +84,50 @@ export function acceptPolished(
   return stripped;
 }
 
+export interface PolishResult {
+  /** 采用的润色结果；为 null 表示这次回落到模板 */
+  text: string | null;
+  /**
+   * 为什么回落，给人看的一句话。
+   *
+   * 没配 LLM 时不填 —— 那种情况本来就不该润色，不是「出问题了」。
+   * 但「配了却一直回落」和「没配」在界面上必须长得不一样，
+   * 否则你会以为模型在干活，其实每一条都是模板。
+   */
+  fallback?: string;
+}
+
+/** 从接口返回里抠出那句人话的错误信息。 */
+function errorDetail(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: string } | string;
+      message?: string;
+    };
+    const raw =
+      typeof parsed.error === "string"
+        ? parsed.error
+        : (parsed.error?.message ?? parsed.message);
+    return typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 120) : undefined;
+  } catch {
+    const trimmed = body.trim();
+    return trimmed ? trimmed.slice(0, 120) : undefined;
+  }
+}
+
 export async function polishReply(
   draft: string,
   context: string,
   guards: PolishGuards = {},
-): Promise<string | null> {
+  options: { fetchImpl?: typeof fetch } = {},
+): Promise<PolishResult> {
   const status = llmStatus();
-  if (!status.configured) return null;
+  if (!status.configured) return { text: null };
+
+  const fetchImpl = options.fetchImpl ?? fetch;
 
   try {
-    const response = await fetch(`${status.baseUrl}/chat/completions`, {
+    const response = await fetchImpl(`${status.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -109,20 +143,47 @@ export async function polishReply(
       }),
       signal: AbortSignal.timeout(12_000),
     });
-    if (!response.ok) return null;
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) return null;
+
+    const body = await response.text();
+
+    if (!response.ok) {
+      const detail = errorDetail(body);
+      // 额度用光、key 失效这类问题不该默默咽掉 —— 不然你会以为模型在干活
+      console.warn(`[agent] 模型调用失败 HTTP ${response.status}：${detail ?? "无详情"}`);
+      return {
+        text: null,
+        fallback: `模型调用失败（HTTP ${response.status}${detail ? `：${detail}` : ""}），已回落到模板。`,
+      };
+    }
+
+    let content: string | undefined;
+    try {
+      const data = JSON.parse(body) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      content = data.choices?.[0]?.message?.content;
+    } catch {
+      return { text: null, fallback: "模型返回的不是合法 JSON，已回落到模板。" };
+    }
+
+    if (!content) {
+      return { text: null, fallback: "模型没有返回正文，已回落到模板。" };
+    }
 
     const accepted = acceptPolished(draft, content, guards);
     if (!accepted) {
       // 回落是安全行为，但得让人知道模型被拦下来了。
       console.warn("[agent] 模型润色未通过校验，已回落到模板草稿。");
+      return {
+        text: null,
+        fallback: "模型改动了草稿里的数字或输出被截断，已弃用并回落到模板。",
+      };
     }
-    return accepted;
-  } catch {
-    return null;
+
+    return { text: accepted };
+  } catch (error) {
+    const reason = error instanceof Error && error.name === "TimeoutError" ? "超时" : "网络错误";
+    console.warn(`[agent] 模型调用${reason}，已回落到模板草稿。`);
+    return { text: null, fallback: `模型调用${reason}，已回落到模板。` };
   }
 }

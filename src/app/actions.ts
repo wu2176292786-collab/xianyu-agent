@@ -265,10 +265,14 @@ export async function draftReplyFor(conversationId: string): Promise<{
 
   return {
     ok: true,
-    text: polished ?? draft.text,
-    message: draft.needsHumanEdit
-      ? "草稿涉及需要你确认的细节，发送前请检查。"
-      : "草稿已生成。",
+    text: polished.text ?? draft.text,
+    // 回落原因要说出来 —— 「配了 LLM 却一直是模板」和「没配」不能长得一样
+    message: [
+      draft.needsHumanEdit ? "草稿涉及需要你确认的细节，发送前请检查。" : "草稿已生成。",
+      polished.fallback,
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
 }
 

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { acceptPolished } from "@/lib/agent/llm";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { acceptPolished, polishReply } from "@/lib/agent/llm";
 
 /** 一条典型的议价草稿：买家出价 ¥3,000.00，按底价算出的还价是 ¥3,850.00。 */
 const DRAFT =
@@ -65,5 +65,83 @@ describe("acceptPolished", () => {
   it("不涉及金额的回复里也不许凭空冒出价格", () => {
     const plain = "在的，这款还有 2 件现货。";
     expect(acceptPolished(plain, "在的，还有两件，99 元包邮。")).toBeNull();
+  });
+});
+
+/**
+ * 回落必须说得出原因。
+ *
+ * 「配了 LLM 却每次都回落」和「没配 LLM」在界面上长得一样的话，
+ * 你会以为模型在干活，其实每一条都是模板。
+ */
+describe("polishReply 的回落原因", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function configure() {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("OPENAI_MODEL", "test-model");
+    vi.stubEnv("OPENAI_BASE_URL", "https://example.invalid/v1");
+  }
+
+  const reply = (body: unknown, status = 200) =>
+    vi.fn(async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+
+  it("没配 LLM 时不算「出问题」，不给回落原因", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const result = await polishReply(DRAFT, "背景", KEEP, { fetchImpl: reply({}) });
+    expect(result.text).toBeNull();
+    expect(result.fallback).toBeUndefined();
+  });
+
+  it("额度用光会把接口那句人话带出来", async () => {
+    configure();
+    const result = await polishReply(DRAFT, "背景", KEEP, {
+      fetchImpl: reply(
+        { error: { type: "rate_limit_error", message: "已达到 Token Plan 用量上限" } },
+        429,
+      ),
+    });
+
+    expect(result.text).toBeNull();
+    expect(result.fallback).toContain("429");
+    expect(result.fallback).toContain("已达到 Token Plan 用量上限");
+  });
+
+  it("模型改了数字时，回落原因说的是数字", async () => {
+    configure();
+    const result = await polishReply(DRAFT, "背景", KEEP, {
+      fetchImpl: reply({
+        choices: [{ message: { content: "你好，最低 3500，要的话我改价。" } }],
+      }),
+    });
+
+    expect(result.text).toBeNull();
+    expect(result.fallback).toContain("数字");
+  });
+
+  it("模型只改措辞就采用，没有回落原因", async () => {
+    configure();
+    const polished = "鱼总你好，3000 真到不了，最低 3850，诚心要我马上改价。";
+    const result = await polishReply(DRAFT, "背景", KEEP, {
+      fetchImpl: reply({ choices: [{ message: { content: polished } }] }),
+    });
+
+    expect(result.text).toBe(polished);
+    expect(result.fallback).toBeUndefined();
+  });
+
+  it("网络挂了也回落，并说清是网络问题", async () => {
+    configure();
+    const result = await polishReply(DRAFT, "背景", KEEP, {
+      fetchImpl: vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+
+    expect(result.text).toBeNull();
+    expect(result.fallback).toContain("网络错误");
   });
 });

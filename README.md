@@ -44,6 +44,10 @@ npm run dev
 所有 `npm run ...` 命令都必须在项目根目录执行 —— 在别处跑会报
 `Could not read package.json`。
 
+浏览器打开 <http://localhost:43117>。用别的地址（局域网 IP、VPN 虚拟网卡）也可以，
+`next.config.ts` 会在启动时读取本机所有 IPv4 地址并自动放行 —— 不放行的话 Next 会把
+HMR 连接当跨源请求拦掉，页面会停在「渲染出来了但点不动」的状态。
+
 打开 http://localhost:43117 。首次运行会自动生成一份示例店铺数据
 （11 件商品、7 个会话、6 笔订单、14 天流量），存在 `.data/state.json`。
 

@@ -18,10 +18,39 @@
   const MAX_KEEP = 40;
   const MAX_BODY = 2_000_000;
 
-  /** @type {Array<{api: string, url: string, at: number, payload: unknown}>} */
+  /**
+   * @type {Array<{
+   *   api: string, url: string, at: number, payload: unknown,
+   *   version?: string, requestData?: string,
+   * }>}
+   */
   const captures = [];
 
-  function remember(url, body) {
+  /** 从 `/h5/{api}/{version}/` 里取版本号。 */
+  function versionOf(url) {
+    return String(url).match(/\/h5\/[^/]+\/([\d.]+)\//)?.[1];
+  }
+
+  /**
+   * 请求里的 `data` 参数。
+   *
+   * 找接口的时候，光有名字不够 —— 还得知道它要哪些业务参数，
+   * 不然只能一个个猜（我们已经猜过一轮了，很贵）。
+   */
+  function requestDataOf(url, body) {
+    try {
+      if (typeof body === "string" && body.includes("data=")) {
+        const raw = new URLSearchParams(body).get("data");
+        if (raw) return raw.slice(0, 400);
+      }
+      const inQuery = new URL(String(url)).searchParams.get("data");
+      return inQuery ? inQuery.slice(0, 400) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function remember(url, body, requestBody) {
     if (!GATEWAY.test(String(url))) return;
     if (typeof body !== "string" || body.length === 0 || body.length > MAX_BODY) return;
 
@@ -36,6 +65,8 @@
         url: String(url),
         at: Date.now(),
         payload,
+        version: versionOf(url),
+        requestData: requestDataOf(url, requestBody),
       });
       if (captures.length > MAX_KEEP) captures.shift();
     } catch {
@@ -51,6 +82,7 @@
         const input = args[0];
         const url =
           typeof input === "string" ? input : (input && input.url) || "";
+        const requestBody = typeof args[1]?.body === "string" ? args[1].body : undefined;
         if (GATEWAY.test(String(url))) {
           result
             .then((response) => {
@@ -58,7 +90,7 @@
               response
                 .clone()
                 .text()
-                .then((text) => remember(url, text))
+                .then((text) => remember(url, text, requestBody))
                 .catch(() => {});
             })
             .catch(() => {});
@@ -74,10 +106,11 @@
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     try {
       if (GATEWAY.test(String(url))) {
+        this.__collectorUrl = url;
         this.addEventListener("load", () => {
           try {
             if (this.responseType === "" || this.responseType === "text") {
-              remember(url, this.responseText);
+              remember(url, this.responseText, this.__collectorBody);
             }
           } catch {
             // 同上
@@ -88,6 +121,16 @@
       // 同上
     }
     return nativeOpen.call(this, method, url, ...rest);
+  };
+
+  const nativeSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (body) {
+    try {
+      if (this.__collectorUrl && typeof body === "string") this.__collectorBody = body;
+    } catch {
+      // 同上
+    }
+    return nativeSend.call(this, body);
   };
 
   /** 页面内嵌的初始 JSON。找不到就找不到，不编。 */

@@ -100,13 +100,9 @@ el("collect").addEventListener("click", async () => {
   say("正在读当前页…");
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) {
-      say("找不到当前标签页。", "error");
-      return;
-    }
-    if (!/^https:\/\/[^/]*goofish\.com\//.test(tab.url ?? "")) {
-      say("请在闲鱼的商品详情页或搜索结果页上点这个按钮。", "error");
+    const { tab, error } = await goofishTab();
+    if (error) {
+      say(error, "error");
       return;
     }
 
@@ -146,6 +142,66 @@ el("collect").addEventListener("click", async () => {
   } finally {
     el("collect").disabled = false;
   }
+});
+
+/** 当前标签页，顺便确认是不是闲鱼的页面。 */
+async function goofishTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return { error: "找不到当前标签页。" };
+  if (!/^https:\/\/[^/]*goofish\.com\//.test(tab.url ?? "")) {
+    return { error: "请在闲鱼的页面上点这个按钮。" };
+  }
+  return { tab };
+}
+
+el("apis").addEventListener("click", async () => {
+  const box = el("apis-list");
+  box.textContent = "读取中…";
+
+  const { tab, error } = await goofishTab();
+  if (error) {
+    box.textContent = error;
+    return;
+  }
+
+  const result = await chrome.tabs.sendMessage(tab.id, { kind: "apis" }).catch(() => undefined);
+  if (!result?.ok) {
+    box.textContent = result?.message ?? "采集脚本还没就绪，刷新一下这个页面再试。";
+    return;
+  }
+  if (result.apis.length === 0) {
+    box.textContent = "这一页还没发过闲鱼接口请求。刷新页面、或者点一下要看的标签，再试。";
+    return;
+  }
+
+  box.innerHTML = "";
+  for (const item of result.apis) {
+    const row = document.createElement("div");
+    row.className = "api";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = `${item.api}${item.version ? `@${item.version}` : ""}`;
+    row.appendChild(name);
+    if (item.requestData) {
+      const data = document.createElement("div");
+      data.className = "data";
+      data.textContent = item.requestData;
+      row.appendChild(data);
+    }
+    box.appendChild(row);
+  }
+
+  const copy = document.createElement("button");
+  copy.className = "secondary";
+  copy.textContent = "全部复制";
+  copy.addEventListener("click", async () => {
+    const text = result.apis
+      .map((i) => `${i.api}@${i.version ?? "?"}\n  data: ${i.requestData ?? "(无)"}`)
+      .join("\n");
+    await navigator.clipboard.writeText(text).catch(() => {});
+    copy.textContent = "已复制";
+  });
+  box.appendChild(copy);
 });
 
 (async () => {

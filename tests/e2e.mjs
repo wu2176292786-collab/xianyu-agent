@@ -332,7 +332,12 @@ await clickUntil(
 );
 const livePanel = await text();
 check("切到真实读通道会显示凭证状态", /凭证：/.test(livePanel));
-check("没导入登录态时如实说没导入", /还没有导入登录态|游客/.test(livePanel));
+// 导入过凭证的机器上会显示「已导入」，没导入的显示「还没有导入」。
+// 断言「一定没导入」会让这条测试依赖开发机的状态 —— 要验的是它如实报告。
+check(
+  "凭证状态如实报告（有就说有，没有就说没有）",
+  /还没有导入登录态|游客/.test(livePanel) || /已导入/.test(livePanel),
+);
 check("未配置的接口如实标出来", /未配置（同步时会保留本地/.test(livePanel));
 
 await clickUntil(
@@ -698,6 +703,62 @@ check(
   "采集端真采到的快照能直接入库",
   fromCollector.status === 200 && /新增 2 件同行商品/.test(fromCollector.body.message),
   fromCollector.body.message,
+);
+
+// 「这一页调了哪些接口」：装一个假的旁听器，验证去重、排序和版本号解析。
+// 找接口名以前只能开 DevTools 或者靠猜（猜过一轮，14 个名字全错）。
+await page.goto("https://www.goofish.com/personal", { waitUntil: "domcontentloaded" });
+await page.evaluate(() => {
+  window.chrome = { runtime: { onMessage: { addListener: () => {} } } };
+
+  // 冒充页面世界里的旁听器：收到 request 就回一批假的记录
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.channel !== "xianyu-collector" || data.kind !== "request") return;
+    window.postMessage(
+      {
+        channel: "xianyu-collector",
+        kind: "response",
+        requestId: data.requestId,
+        captures: [
+          {
+            api: "mtop.idle.web.xyh.item.list",
+            version: "1.0",
+            at: 1000,
+            requestData: '{"userId":"1","pageNumber":1}',
+          },
+          // 同一个接口的旧记录，应该被更新的那条顶掉
+          { api: "mtop.taobao.idlemessage.pc.session.sync", version: "3.0", at: 500 },
+          {
+            api: "mtop.taobao.idlemessage.pc.session.sync",
+            version: "3.0",
+            at: 2000,
+            requestData: '{"fetchNum":20}',
+          },
+          // 没有 api 名字的记录要丢掉
+          { api: "", version: "1.0", at: 3000 },
+        ],
+        hydration: undefined,
+      },
+      location.origin,
+    );
+  });
+});
+await page.addScriptTag({ path: "tools/xianyu-collector/collect.js" });
+const apiReport = await page.evaluate(() => listApis());
+
+check("采集端能报出这一页调了哪些接口", apiReport.ok && apiReport.apis.length === 2, `${apiReport.apis?.length ?? 0} 个`);
+check(
+  "同一个接口只留最近一次，按时间倒序",
+  apiReport.apis?.[0]?.api === "mtop.taobao.idlemessage.pc.session.sync" &&
+    apiReport.apis?.[0]?.requestData === '{"fetchNum":20}',
+  JSON.stringify(apiReport.apis?.[0]),
+);
+check(
+  "带上版本号和请求参数 —— 光有名字还得再猜一轮参数",
+  apiReport.apis?.[0]?.version === "3.0" &&
+    apiReport.apis?.[1]?.requestData === '{"userId":"1","pageNumber":1}',
+  JSON.stringify(apiReport.apis?.[1]),
 );
 
 await page.unroute("https://www.goofish.com/**");

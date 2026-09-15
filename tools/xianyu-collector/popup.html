@@ -146,6 +146,37 @@
 
     <div id="message" hidden></div>
 
+    <details id="apis-box">
+      <summary>这一页调了哪些接口</summary>
+      <p class="hint" style="margin-top: 6px">
+        旁听页面自己发的请求，不用开 DevTools。找「在售商品」「我卖出的」这类接口时用。
+      </p>
+      <button class="secondary" id="apis">列出来</button>
+      <div id="apis-list"></div>
+    </details>
+
+    <style>
+      #apis-list {
+        margin-top: 8px;
+      }
+      .api {
+        padding: 6px 8px;
+        margin-bottom: 4px;
+        border: 1px solid #e4e4e7;
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        word-break: break-all;
+      }
+      .api .name {
+        font-weight: 600;
+      }
+      .api .data {
+        color: #71717a;
+      }
+    </style>
+
     <script src="popup.js"></script>
   </body>
 </html>

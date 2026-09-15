@@ -198,11 +198,49 @@ async function buildSnapshot() {
   return { ok: true, snapshot };
 }
 
+/**
+ * 这一页调了哪些闲鱼接口。
+ *
+ * 找接口名本来只能靠 DevTools 抓包，或者靠猜（我们猜过一轮：14 个名字全错）。
+ * 旁听器反正已经把页面自己发的请求记下来了，顺手报出来就省掉这件事。
+ *
+ * 同一个接口只留最近一次，按时间倒序。
+ */
+async function listApis() {
+  const { captures } = await askInterceptor();
+  const latest = new Map();
+
+  for (const capture of captures) {
+    if (!capture.api) continue;
+    const seen = latest.get(capture.api);
+    if (!seen || seen.at < capture.at) {
+      latest.set(capture.api, {
+        api: capture.api,
+        version: capture.version,
+        requestData: capture.requestData,
+        at: capture.at,
+      });
+    }
+  }
+
+  return { ok: true, apis: [...latest.values()].sort((a, b) => b.at - a.at) };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.kind !== "collect") return undefined;
-  buildSnapshot()
-    .then(sendResponse)
-    .catch((error) => sendResponse({ ok: false, message: String(error?.message ?? error) }));
-  // 告诉 Chrome 这是个异步回答
-  return true;
+  if (message?.kind === "collect") {
+    buildSnapshot()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, message: String(error?.message ?? error) }));
+    // 告诉 Chrome 这是个异步回答
+    return true;
+  }
+
+  if (message?.kind === "apis") {
+    listApis()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, message: String(error?.message ?? error) }));
+    return true;
+  }
+
+  return undefined;
 });

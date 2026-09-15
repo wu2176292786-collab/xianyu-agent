@@ -28,10 +28,21 @@
 
 ## 快速开始
 
+需要 **Node 22.12+**（`vitest` 的下限）。先确认一下：
+
+```bash
+node -v    # 低于 v22.12 的话先升级，比如 nvm install 22 && nvm use 22
+```
+
+然后在**项目目录**里（不是家目录）跑：
+
 ```bash
 npm install
 npm run dev
 ```
+
+所有 `npm run ...` 命令都必须在项目根目录执行 —— 在别处跑会报
+`Could not read package.json`。
 
 打开 http://localhost:43117 。首次运行会自动生成一份示例店铺数据
 （11 件商品、7 个会话、6 笔订单、14 天流量），存在 `.data/state.json`。

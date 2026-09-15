@@ -14,6 +14,13 @@ export interface Listing {
   priceCents: number;
   /** 可以自动降价的下限，Agent 永远不会把价格压到这条线以下 */
   floorPriceCents: number;
+  /**
+   * 底价是不是你亲自确认过的。
+   *
+   * 从平台同步进来的新商品只有挂牌价，底价是猜的，这时候自动降价必须避开它 ——
+   * 拿一个猜出来的底价去降价，等于没有底价。
+   */
+  floorConfirmed: boolean;
   costCents: number;
   stock: number;
   status: ListingStatus;
@@ -138,6 +145,8 @@ export interface AgentAction {
   failureReason?: string;
   /** 已经尝试执行的次数，重试会累加 */
   attempts?: number;
+  /** 演练模式下「执行」的，实际什么都没发生 */
+  dryRun?: boolean;
 }
 
 export type TickTrigger = "manual" | "scheduled";
@@ -150,6 +159,8 @@ export interface AgentRun {
   queued: number;
   applied: number;
   failed: number;
+  /** 因为急停或限流没做的事 */
+  skipped: number;
   durationMs: number;
 }
 
@@ -184,8 +195,54 @@ export interface ShopSettings {
   autoTickMinutes: number;
 }
 
+/** 数据从哪来。 */
+export type ReadChannel = "mock" | "live";
+
+/**
+ * 写操作往哪去。
+ *
+ * - `mock`：改本地状态，模拟平台反应。演示和开发用，不碰任何真实账号。
+ * - `dry_run`：演练。只记录「本来要干什么」，什么都不改，用来在接真实账号
+ *   之前观察 Agent 到底想做哪些事。
+ * - `live`：真实写入。通道还没实现，选了也会被拒绝。
+ */
+export type WriteMode = "mock" | "dry_run" | "live";
+
+export interface ChannelConfig {
+  read: ReadChannel;
+  write: WriteMode;
+  /** 每分钟最多几次写操作（只在非 mock 模式生效） */
+  maxWritesPerMinute: number;
+  /** 两次写操作之间的最小间隔（毫秒），避免看起来像机器 */
+  minWriteIntervalMs: number;
+  /** 连续失败多少次就自动急停 */
+  autoPauseAfterFailures: number;
+}
+
+/** 急停与限流的运行时状态。 */
+export interface SafetyState {
+  paused: boolean;
+  pausedReason?: string;
+  pausedAt?: string;
+  /** 谁按下的急停：人、连续失败、还是疑似风控 */
+  pausedBy?: "human" | "failures" | "risk_control";
+  /** 最近的写操作时间戳，用于滑动窗口限流 */
+  recentWrites: number[];
+  consecutiveFailures: number;
+}
+
+/** 一次平台同步拉回来的快照。 */
+export interface PlatformSnapshot {
+  fetchedAt: string;
+  listings: Listing[];
+  conversations: Conversation[];
+  orders: Order[];
+}
+
 export interface AppState {
   settings: ShopSettings;
+  channel: ChannelConfig;
+  safety: SafetyState;
   listings: Listing[];
   conversations: Conversation[];
   orders: Order[];
@@ -196,5 +253,6 @@ export interface AppState {
   /** 巡检历史，最近的在前 */
   runs: AgentRun[];
   lastTickAt?: string;
+  lastSyncAt?: string;
   seededAt: string;
 }

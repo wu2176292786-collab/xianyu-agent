@@ -3,7 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { delistListing, refreshListing, updateListingPrice } from "@/app/actions";
+import {
+  confirmFloorPrice,
+  delistListing,
+  refreshListing,
+  updateListingPrice,
+} from "@/app/actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,13 +42,18 @@ export function ListingsTable({ listings }: { listings: Listing[] }) {
   const [pending, startTransition] = useTransition();
   const [editing, setEditing] = useState<Listing | null>(null);
   const [price, setPrice] = useState("");
+  const [confirming, setConfirming] = useState<Listing | null>(null);
+  const [floor, setFloor] = useState("");
   const router = useRouter();
 
   const run = (fn: () => Promise<{ ok: boolean; message: string }>) =>
     startTransition(async () => {
       const result = await fn();
       toast[result.ok ? "success" : "error"](result.message);
-      if (result.ok) setEditing(null);
+      if (result.ok) {
+        setEditing(null);
+        setConfirming(null);
+      }
       router.refresh();
     });
 
@@ -87,9 +97,23 @@ export function ListingsTable({ listings }: { listings: Listing[] }) {
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
                   <p className="font-medium">{yuan(listing.priceCents)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    底价 {yuan(listing.floorPriceCents)}
-                  </p>
+                  {listing.floorConfirmed ? (
+                    <p className="text-xs text-muted-foreground">
+                      底价 {yuan(listing.floorPriceCents)}
+                    </p>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => {
+                        setConfirming(listing);
+                        setFloor(yuanPlain(listing.floorPriceCents));
+                      }}
+                      className="text-xs text-amber-700 underline underline-offset-2"
+                    >
+                      底价待确认
+                    </button>
+                  )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{listing.stock}</TableCell>
                 <TableCell className="text-right tabular-nums">
@@ -168,6 +192,46 @@ export function ListingsTable({ listings }: { listings: Listing[] }) {
               onClick={() => editing && run(() => updateListingPrice(editing.id, price))}
             >
               保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={confirming !== null}
+        onOpenChange={(open) => !open && setConfirming(null)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认底价</DialogTitle>
+            <DialogDescription className="line-clamp-2">
+              {confirming?.title}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="listing-floor">底价（元）</Label>
+            <Input
+              id="listing-floor"
+              value={floor}
+              inputMode="decimal"
+              onChange={(event) => setFloor(event.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              这件商品是同步进来的，当前底价是按挂牌价估的。确认之前，自动降价会绕开它 ——
+              拿一个猜出来的底价去降价，等于没有底价。
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirming(null)} disabled={pending}>
+              取消
+            </Button>
+            <Button
+              disabled={pending || !confirming}
+              onClick={() =>
+                confirming && run(() => confirmFloorPrice(confirming.id, floor))
+              }
+            >
+              确认
             </Button>
           </DialogFooter>
         </DialogContent>

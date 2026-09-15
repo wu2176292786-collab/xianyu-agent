@@ -1,4 +1,4 @@
-import { mockAdapter } from "@/lib/adapters/mock";
+import { writeChannel } from "@/lib/adapters";
 import type { AppState, TickTrigger } from "@/lib/domain/types";
 import { logActivity } from "@/lib/store";
 import { runTick } from "./engine";
@@ -7,6 +7,8 @@ export interface TickSummary {
   queued: number;
   applied: number;
   failed: number;
+  /** 因为急停或限流没做、下一轮会重提的 */
+  skipped: number;
   /** 给人看的一句话结论 */
   message: string;
 }
@@ -20,7 +22,7 @@ export function performTick(
   now: number,
   trigger: TickTrigger,
 ): TickSummary {
-  const result = runTick(state, mockAdapter, now, trigger);
+  const result = runTick(state, writeChannel, now, trigger);
   const prefix = trigger === "scheduled" ? "自动巡检：" : "";
 
   for (const message of result.messages) {
@@ -42,19 +44,37 @@ export function performTick(
       now,
     );
   }
-  if (result.queued.length === 0 && result.applied.length === 0 && result.failed.length === 0) {
+  if (result.skipped > 0) {
+    logActivity(
+      state,
+      "system",
+      `${prefix}有 ${result.skipped} 项这一轮没做：${result.skipReason ?? "写操作被拦下"}。下一轮会重新提出来。`,
+      now,
+    );
+  }
+  if (
+    result.queued.length === 0 &&
+    result.applied.length === 0 &&
+    result.failed.length === 0 &&
+    result.skipped === 0
+  ) {
     logActivity(state, "agent", `${prefix}跑了一轮，当前没有需要处理的事情。`, now);
   }
 
+  const dryRun = state.channel.write === "dry_run";
   const parts: string[] = [];
-  if (result.applied.length > 0) parts.push(`自动执行 ${result.applied.length} 项`);
+  if (result.applied.length > 0) {
+    parts.push(`${dryRun ? "演练执行" : "自动执行"} ${result.applied.length} 项`);
+  }
   if (result.queued.length > 0) parts.push(`${result.queued.length} 项待你审批`);
   if (result.failed.length > 0) parts.push(`${result.failed.length} 项执行失败`);
+  if (result.skipped > 0) parts.push(`${result.skipped} 项被拦下`);
 
   return {
     queued: result.queued.length,
     applied: result.applied.length,
     failed: result.failed.length,
+    skipped: result.skipped,
     message:
       parts.length === 0
         ? "Agent 跑完了，暂时没有新建议。"

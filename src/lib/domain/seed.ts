@@ -1,3 +1,4 @@
+import { mulberry32 } from "@/lib/random";
 import type {
   ActivityEntry,
   AppState,
@@ -11,18 +12,6 @@ import type {
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-/** 固定种子的伪随机数，保证每次 seed 出来的示例数据一致，方便截图和测试。 */
-function mulberry32(seed: number) {
-  let a = seed;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 function iso(now: number, offsetMs: number): string {
   return new Date(now + offsetMs).toISOString();
 }
@@ -32,7 +21,7 @@ function dateKey(ts: number): string {
 }
 
 const LISTING_BLUEPRINTS: Array<
-  Omit<Listing, "createdAt" | "lastRefreshedAt" | "id">
+  Omit<Listing, "createdAt" | "lastRefreshedAt" | "id" | "floorConfirmed">
 > = [
   {
     title: "iPhone 14 Pro 256G 暗紫色 国行双卡 电池健康 92%",
@@ -199,6 +188,7 @@ function buildListings(now: number, rand: () => number): Listing[] {
     return {
       ...bp,
       id: `L${String(index + 1).padStart(3, "0")}`,
+      floorConfirmed: true,
       createdAt: iso(now, -ageDays * DAY),
       lastRefreshedAt: iso(now, -refreshHoursAgo * HOUR),
     };
@@ -524,6 +514,18 @@ export function createSeedState(now = Date.now()): AppState {
       signature: "—— 老陈｜工作日 22:00 前的订单当天寄出",
       autoTickEnabled: true,
       autoTickMinutes: 15,
+    },
+    channel: {
+      read: "mock",
+      write: "mock",
+      maxWritesPerMinute: 12,
+      minWriteIntervalMs: 1500,
+      autoPauseAfterFailures: 3,
+    },
+    safety: {
+      paused: false,
+      recentWrites: [],
+      consecutiveFailures: 0,
     },
     listings: buildListings(now, rand),
     conversations: buildConversations(now),

@@ -19,6 +19,7 @@ const listing: Listing = {
   emoji: "📱",
   priceCents: 419000,
   floorPriceCents: 385000,
+  floorConfirmed: true,
   costCents: 352000,
   stock: 1,
   status: "on_sale",

@@ -1,18 +1,29 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { mockAdapter } from "@/lib/adapters/mock";
+import { readerFor, writeChannel } from "@/lib/adapters";
+import {
+  WRITE_MODE_LABEL,
+  pauseWrites,
+  resumeWrites,
+} from "@/lib/adapters/guard";
 import {
   applyAction,
   applyActionWithEdits,
   retryAction,
   type ActionEdits,
 } from "@/lib/agent/engine";
+import { describeMerge, mergeSnapshot } from "@/lib/agent/sync";
 import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
 import { INTENT_LABEL, draftReply } from "@/lib/agent/reply";
-import type { AppState } from "@/lib/domain/types";
-import { parseYuanToCents } from "@/lib/format";
+import type {
+  AppState,
+  ChannelConfig,
+  ReadChannel,
+  WriteMode,
+} from "@/lib/domain/types";
+import { parseYuanToCents, yuan } from "@/lib/format";
 import { getState, logActivity, mutateState, resetState } from "@/lib/store";
 
 export interface ActionResponse {
@@ -41,7 +52,7 @@ export async function retryFailedAction(actionId: string): Promise<ActionRespons
     if (!action) return { ok: false, message: "找不到这条动作。" };
     if (action.status !== "failed") return { ok: false, message: "这条动作不是失败状态。" };
 
-    const outcome = retryAction(state, action, mockAdapter, now);
+    const outcome = retryAction(state, action, writeChannel, now);
     logActivity(
       state,
       outcome.ok ? "human" : "system",
@@ -118,7 +129,7 @@ export async function decideAction(
       return { ok: true, message: "已忽略这条建议。" };
     }
 
-    const outcome = applyAction(state, action, mockAdapter, now);
+    const outcome = applyAction(state, action, writeChannel, now);
     if (!outcome.ok) {
       logActivity(state, "system", `执行失败：${outcome.message}`, now);
       return { ok: false, message: outcome.message };
@@ -146,7 +157,7 @@ export async function approveActionWithEdits(
       return { ok: false, message: "这条建议已经处理过了。" };
     }
 
-    const outcome = applyActionWithEdits(state, action, edits, mockAdapter, now);
+    const outcome = applyActionWithEdits(state, action, edits, writeChannel, now);
     action.attempts = (action.attempts ?? 0) + 1;
     if (!outcome.ok) {
       if (action.status === "failed") action.failureReason = outcome.message;
@@ -183,7 +194,7 @@ export async function decideAllPending(
         done += 1;
         continue;
       }
-      const outcome = applyAction(state, action, mockAdapter, now);
+      const outcome = applyAction(state, action, writeChannel, now);
       if (outcome.ok) {
         action.status = "applied";
         action.decidedAt = new Date(now).toISOString();
@@ -248,7 +259,7 @@ export async function sendReply(
 ): Promise<ActionResponse> {
   const now = Date.now();
   const response = await mutateState((state) => {
-    const outcome = mockAdapter.sendMessage(state, conversationId, text, now);
+    const outcome = writeChannel.sendMessage(state, conversationId, text, now);
     if (outcome.ok) logActivity(state, "human", outcome.message, now);
     return { ok: outcome.ok, message: outcome.message };
   });
@@ -259,7 +270,7 @@ export async function sendReply(
 export async function refreshListing(listingId: string): Promise<ActionResponse> {
   const now = Date.now();
   const response = await mutateState((state) => {
-    const outcome = mockAdapter.refreshListing(state, listingId, now);
+    const outcome = writeChannel.refreshListing(state, listingId, now);
     if (outcome.ok) logActivity(state, "human", outcome.message, now);
     return outcome;
   });
@@ -276,7 +287,7 @@ export async function updateListingPrice(
 
   const now = Date.now();
   const response = await mutateState((state) => {
-    const outcome = mockAdapter.updatePrice(state, listingId, cents, now);
+    const outcome = writeChannel.updatePrice(state, listingId, cents, now);
     if (outcome.ok) logActivity(state, "human", outcome.message, now);
     return outcome;
   });
@@ -287,7 +298,7 @@ export async function updateListingPrice(
 export async function delistListing(listingId: string): Promise<ActionResponse> {
   const now = Date.now();
   const response = await mutateState((state) => {
-    const outcome = mockAdapter.delistListing(state, listingId, now);
+    const outcome = writeChannel.delistListing(state, listingId, now);
     if (outcome.ok) logActivity(state, "human", outcome.message, now);
     return outcome;
   });
@@ -305,7 +316,7 @@ export async function shipOrder(
   }
   const now = Date.now();
   const response = await mutateState((state) => {
-    const outcome = mockAdapter.shipOrder(state, orderId, carrier.trim(), trackingNo.trim(), now);
+    const outcome = writeChannel.shipOrder(state, orderId, carrier.trim(), trackingNo.trim(), now);
     if (outcome.ok) logActivity(state, "human", outcome.message, now);
     return outcome;
   });
@@ -396,6 +407,141 @@ export async function updateSettings(input: {
     state.settings.signature = input.signature.trim();
     return { ok: true, message: "店铺设置已保存。" };
   });
+  revalidateAll();
+  return response;
+}
+
+export async function setWritesPaused(
+  paused: boolean,
+  reason?: string,
+): Promise<ActionResponse> {
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    if (paused) {
+      pauseWrites(state, reason?.trim() || "你按下了急停", "human", now);
+      logActivity(state, "human", "按下急停，所有写操作已停止。", now);
+      return { ok: true, message: "已急停，Agent 不会再动任何东西。" };
+    }
+    const was = state.safety.pausedReason;
+    resumeWrites(state);
+    logActivity(state, "human", `解除急停（此前原因：${was ?? "未说明"}）。`, now);
+    return { ok: true, message: "已解除急停。" };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+export async function updateChannel(input: {
+  read?: ReadChannel;
+  write?: WriteMode;
+  maxWritesPerMinute?: string;
+  minWriteIntervalMs?: string;
+  autoPauseAfterFailures?: string;
+}): Promise<ActionResponse> {
+  const numeric: Array<[keyof ChannelConfig, string | undefined, number, number]> = [
+    ["maxWritesPerMinute", input.maxWritesPerMinute, 1, 600],
+    ["minWriteIntervalMs", input.minWriteIntervalMs, 0, 60_000],
+    ["autoPauseAfterFailures", input.autoPauseAfterFailures, 1, 50],
+  ];
+  for (const [, raw, min, max] of numeric) {
+    if (raw === undefined) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < min || value > max) {
+      return { ok: false, message: `参数超出范围，应该在 ${min} 到 ${max} 之间。` };
+    }
+  }
+
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    const before = { ...state.channel };
+    if (input.read) state.channel.read = input.read;
+    if (input.write) state.channel.write = input.write;
+    for (const [key, raw] of numeric) {
+      if (raw !== undefined) state.channel[key] = Number(raw) as never;
+    }
+
+    if (before.write !== state.channel.write) {
+      logActivity(
+        state,
+        "human",
+        `写模式：${WRITE_MODE_LABEL[before.write]} → ${WRITE_MODE_LABEL[state.channel.write]}。`,
+        now,
+      );
+    }
+    if (before.read !== state.channel.read) {
+      logActivity(
+        state,
+        "human",
+        `读通道：${before.read === "live" ? "真实账号" : "本地模拟"} → ${
+          state.channel.read === "live" ? "真实账号" : "本地模拟"
+        }。`,
+        now,
+      );
+    }
+    return { ok: true, message: "通道设置已保存。" };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+/** 从平台拉一次数据合进本地。写模式是什么都不影响这一步，同步只读不写。 */
+export async function syncFromPlatform(): Promise<ActionResponse> {
+  const now = Date.now();
+  const state = await getState();
+  const reader = readerFor(state);
+
+  let snapshot;
+  try {
+    snapshot = await reader.fetchSnapshot(state, now);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "读通道调用失败";
+    await mutateState((s) => logActivity(s, "system", `同步失败：${message}`, now));
+    revalidateAll();
+    return { ok: false, message };
+  }
+
+  const response = await mutateState((s) => {
+    const summary = mergeSnapshot(s, snapshot, now);
+    const text = describeMerge(summary);
+    logActivity(s, "system", `已从${reader.label}同步：${text}。`, now);
+    if (summary.needsFloorPrice > 0) {
+      logActivity(
+        s,
+        "system",
+        `有 ${summary.needsFloorPrice} 件在售商品还没确认底价，自动降价会绕开它们。`,
+        now,
+      );
+    }
+    return { ok: true, message: `同步完成：${text}。` };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+/** 人工确认某件商品的底价，确认之后自动降价才会考虑它。 */
+export async function confirmFloorPrice(
+  listingId: string,
+  priceInput: string,
+): Promise<ActionResponse> {
+  const cents = parseYuanToCents(priceInput);
+  if (cents === null) return { ok: false, message: "底价格式不对，试试 199 或 199.50。" };
+
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    const listing = state.listings.find((l) => l.id === listingId);
+    if (!listing) return { ok: false, message: "找不到这件商品。" };
+    if (cents > listing.priceCents) {
+      return { ok: false, message: "底价不能高于当前挂牌价。" };
+    }
+    listing.floorPriceCents = cents;
+    listing.floorConfirmed = true;
+    logActivity(state, "human", `确认「${listing.title}」的底价为 ${yuan(cents)}。`, now);
+    return { ok: true, message: `底价已确认为 ${yuan(cents)}。` };
+  });
+
   revalidateAll();
   return response;
 }

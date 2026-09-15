@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Geist_Mono, Noto_Sans_SC } from "next/font/google";
 import { AgentTickButton } from "@/components/agent-tick-button";
 import { MobileNav } from "@/components/mobile-nav";
 import { NavLinks, type NavItem } from "@/components/nav-links";
 import { Toaster } from "@/components/ui/sonner";
+import { WRITE_MODE_LABEL } from "@/lib/adapters/guard";
 import { llmStatus } from "@/lib/agent/llm";
 import { awaitingSellerReply } from "@/lib/agent/reply";
 import { relativeTime } from "@/lib/format";
@@ -73,7 +75,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
               <NavLinks items={navItems} />
             </div>
             <div className="space-y-1 border-t p-4 text-xs text-muted-foreground">
-              <p>通道：本地模拟（不会操作真实账号）</p>
+              <p>写通道：{WRITE_MODE_LABEL[state.channel.write]}</p>
               <p>回复模型：{llm.configured ? llm.model : "内置模板（未配置 LLM）"}</p>
               <p>
                 自动巡检：
@@ -109,6 +111,32 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
               </div>
               <AgentTickButton size="sm" />
             </header>
+            {state.safety.paused || state.channel.write !== "mock" ? (
+              <div
+                className={
+                  state.safety.paused
+                    ? "border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800 sm:px-6"
+                    : "border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 sm:px-6"
+                }
+              >
+                {state.safety.paused ? (
+                  <>
+                    <strong className="font-medium">已急停</strong> ——
+                    所有写操作都被拦下。{state.safety.pausedReason ?? ""}
+                  </>
+                ) : (
+                  <>
+                    <strong className="font-medium">
+                      {WRITE_MODE_LABEL[state.channel.write]}
+                    </strong>{" "}
+                    —— 这个模式下「执行」不会真的改变任何东西。
+                  </>
+                )}{" "}
+                <Link href="/automations" className="underline underline-offset-2">
+                  去设置
+                </Link>
+              </div>
+            ) : null}
             <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">{children}</main>
           </div>
         </div>

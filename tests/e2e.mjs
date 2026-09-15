@@ -295,7 +295,70 @@ await ruleSwitch.click();
 await page.waitForTimeout(1500);
 check("自动巡检保持开启", await page.locator('[aria-label="自动巡检开关"]').getAttribute("data-checked") !== null);
 
+// ---------- 7.5 通道与安全 ----------
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+check("有通道与安全卡片", /通道与安全/.test(await text()));
+
+// 从平台同步（读通道）
+await clickUntil(
+  page.getByRole("button", { name: "从平台同步" }),
+  page.locator("[data-sonner-toast]").first(),
+);
+await checkToast("从平台同步可用", /同步完成/);
+
+// 切到演练模式
+await clickUntil(
+  page.locator("button").filter({ hasText: "演练（只记录不执行）" }).first(),
+  page.locator("text=这个模式下「执行」不会真的改变任何东西").first(),
+);
+check("演练模式有全局横幅", /这个模式下「执行」不会真的改变任何东西/.test(await text()));
+
+// 演练模式下擦亮：提示成功，但商品的擦亮时间不变
+await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
+const beforeDryRun = await page.locator("tbody tr").first().innerText();
+await page.locator("tbody tr").first().getByRole("button", { name: "擦亮" }).click();
+await checkToast("演练模式下写操作被标记为演练", /演练/);
+await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
+check(
+  "演练模式下数据真的没变",
+  (await page.locator("tbody tr").first().innerText()) === beforeDryRun,
+);
+
+// 急停
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+await clickUntil(
+  page.getByRole("button", { name: "急停" }),
+  page.locator("text=所有写操作已停止").first(),
+);
+await checkToast("急停生效", /已急停/);
+check("急停后有全局横幅", /已急停/.test(await text()));
+
+await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
+await page.locator("tbody tr").first().getByRole("button", { name: "擦亮" }).click();
+await checkToast("急停时写操作被拒绝", /已急停/);
+
+// 解除急停并切回本地模拟，别把状态留给后面的步骤
+await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
+await clickUntil(
+  page.getByRole("button", { name: "解除急停" }),
+  page.locator("button").filter({ hasText: "本地模拟" }).first(),
+);
+await checkToast("可以解除急停", /已解除/);
+await clickUntil(
+  page.locator("button").filter({ hasText: "改本地数据，模拟平台反应" }).first(),
+  page.locator("[data-sonner-toast]").first(),
+);
+await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
+await page.locator("tbody tr").first().getByRole("button", { name: "擦亮" }).click();
+await checkToast("切回本地模拟后写操作恢复", /已擦亮/);
+
 // ---------- 8. mobile ----------
+// 等提示条自己消失，否则窄屏下它会盖住顶部的菜单按钮
+await page
+  .locator("[data-sonner-toast]")
+  .last()
+  .waitFor({ state: "detached", timeout: 10_000 })
+  .catch(() => {});
 await page.setViewportSize({ width: 420, height: 860 });
 await page.goto(BASE, { waitUntil: "networkidle" });
 await page.waitForTimeout(600);

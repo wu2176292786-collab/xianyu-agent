@@ -1,3 +1,4 @@
+import { checkWriteBudget } from "@/lib/adapters/guard";
 import { mockTrackingNumber, suggestCarrier } from "@/lib/adapters/mock";
 import type { AdapterResult, XianyuAdapter } from "@/lib/adapters/types";
 import type {
@@ -90,6 +91,8 @@ function proposePriceDrop(state: AppState, now: number): Proposal[] {
       (l) =>
         l.status === "on_sale" &&
         l.stock > 0 &&
+        // 底价没人确认过就不碰 —— 拿一个估出来的底价去降价等于没有底价
+        l.floorConfirmed &&
         l.priceCents > l.floorPriceCents &&
         daysSince(l.createdAt, now) >= staleDays &&
         l.views7d <= maxViews,
@@ -345,6 +348,9 @@ export interface TickResult {
   applied: AgentAction[];
   /** 自动执行时失败的动作，会留在队列里等人处理 */
   failed: AgentAction[];
+  /** 因为急停或限流这一轮没做的事，下一轮会重新提出来 */
+  skipped: number;
+  skipReason?: string;
   messages: string[];
   run: AgentRun;
 }
@@ -362,6 +368,7 @@ export function runTick(
     queued: [],
     applied: [],
     failed: [],
+    skipped: 0,
     messages: [],
     run: {
       id: `RUN-${now.toString(36)}`,
@@ -370,6 +377,7 @@ export function runTick(
       queued: 0,
       applied: 0,
       failed: 0,
+      skipped: 0,
       durationMs: 0,
     },
   };
@@ -385,12 +393,22 @@ export function runTick(
       continue;
     }
 
+    // 急停或限流的时候干脆不创建这条动作 —— 状态没变，下一轮自然会再提出来，
+    // 比塞进失败队列让人手动重试干净得多。
+    const budget = checkWriteBudget(state, now);
+    if (!budget.ok) {
+      result.skipped += 1;
+      result.skipReason ??= budget.reason;
+      continue;
+    }
+
     const action = toAction(proposal, now, "applied", "agent");
     action.attempts = 1;
     const outcome = applyAction(state, action, adapter, now);
     state.actions.unshift(action);
 
     if (outcome.ok) {
+      action.dryRun = outcome.dryRun;
       result.applied.push(action);
       result.messages.push(outcome.message);
     } else {
@@ -415,6 +433,7 @@ export function runTick(
   result.run.queued = result.queued.length;
   result.run.applied = result.applied.length;
   result.run.failed = result.failed.length;
+  result.run.skipped = result.skipped;
   result.run.durationMs = Math.max(0, Date.now() - startedAt);
   state.runs = [result.run, ...(state.runs ?? [])].slice(0, 50);
 

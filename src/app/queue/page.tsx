@@ -19,6 +19,7 @@ function HistoryRow({ action }: { action: AgentAction }) {
         <p className="mt-0.5 text-xs text-muted-foreground">{action.reason}</p>
       </div>
       <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+        {action.dryRun ? <Badge variant="outline">演练</Badge> : null}
         <Badge variant={action.status === "applied" ? "secondary" : "outline"}>
           {action.status === "applied"
             ? action.decidedBy === "agent"

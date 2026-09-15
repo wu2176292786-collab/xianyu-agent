@@ -1,5 +1,6 @@
 import { AgentTickButton } from "@/components/agent-tick-button";
 import { AutoTickCard } from "@/components/auto-tick-card";
+import { ChannelCard } from "@/components/channel-card";
 import { RuleCard } from "@/components/rule-card";
 import { SettingsForm } from "@/components/settings-form";
 import {
@@ -9,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { READ_CHANNEL_LABEL, WRITE_MODE_LABEL } from "@/lib/adapters/guard";
 import { nextScheduledTickAt } from "@/lib/agent/engine";
 import { llmStatus } from "@/lib/agent/llm";
 import { nowMs } from "@/lib/format";
@@ -43,6 +45,12 @@ export default async function AutomationsPage() {
         <AgentTickButton size="sm" />
       </div>
 
+      <ChannelCard
+        channel={state.channel}
+        safety={state.safety}
+        lastSyncAt={state.lastSyncAt}
+      />
+
       <AutoTickCard
         settings={state.settings}
         runs={state.runs}
@@ -75,7 +83,7 @@ export default async function AutomationsPage() {
         <CardContent className="space-y-2 text-sm">
           <p>
             <span className="text-muted-foreground">平台通道：</span>
-            本地模拟通道（MockXianyuAdapter）
+            {READ_CHANNEL_LABEL[state.channel.read]} · 写：{WRITE_MODE_LABEL[state.channel.write]}
           </p>
           <p>
             <span className="text-muted-foreground">回复生成：</span>

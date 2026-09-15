@@ -21,7 +21,8 @@ import path from "node:path";
 
 const FILE = path.join(process.cwd(), ".secrets", "xianyu-login-state.json");
 const HOST = "https://h5api.m.goofish.com";
-const APP_KEY = "12574478";
+// 闲鱼网页版自己的 appKey，参与签名。填淘宝那个 12574478 的话签名永远算不对。
+const APP_KEY = "34839810";
 // 故意不收 accept-encoding：浏览器会报 zstd，Node 的 fetch 不一定解得开
 const HEADER_ALLOWLIST = [
   "user-agent",
@@ -168,6 +169,27 @@ function describe(state) {
 }
 
 async function readStdin() {
+  // 交互式运行时先把提示打出来。不打的话终端只是静静地卡住，
+  // 谁也猜不到它在等你粘贴。提示走 stderr，不污染管道里的数据。
+  if (process.stdin.isTTY) {
+    process.stderr.write(
+      [
+        "等着你粘贴登录态。",
+        "",
+        "  1. 浏览器登录 www.goofish.com",
+        "  2. 点扩展「Xianyu Login State Extractor」→ 勾选同意 → 提取（内容进剪贴板）",
+        "  3. 在这里粘贴（⌘V），然后按 Ctrl-D 结束",
+        "",
+        "不想粘贴就按 Ctrl-C 退出，改用文件：",
+        "  npm run xianyu:login -- --file ~/Downloads/xianyu.json",
+        "",
+        "粘贴的内容等同于你的账号，别发给任何人。",
+        "",
+        "> ",
+      ].join("\n"),
+    );
+  }
+
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
@@ -177,6 +199,7 @@ async function verify(state) {
   const token = state.cookie.match(/_m_h5_tk=([^;_]+)_/)?.[1] ?? "";
   const t = String(Date.now());
   const data = "{}";
+  const api = "mtop.idle.web.user.page.nav";
   const query = new URLSearchParams({
     jsv: "2.7.2",
     appKey: APP_KEY,
@@ -184,18 +207,26 @@ async function verify(state) {
     sign: createHash("md5").update(`${token}&${t}&${APP_KEY}&${data}`).digest("hex"),
     v: "1.0",
     type: "originaljson",
+    accountSite: "xianyu",
     dataType: "json",
-    api: "mtop.idle.web.user.page.nav",
-    data,
+    timeout: "20000",
+    api,
+    sessionOption: "AutoLoginOnly",
+    spm_cnt: "a21ybx.home.0.0",
   });
 
-  const response = await fetch(`${HOST}/h5/mtop.idle.web.user.page.nav/1.0/?${query}`, {
+  // 和浏览器一样：POST，data 放表单体
+  const response = await fetch(`${HOST}/h5/${api}/1.0/?${query}`, {
+    method: "POST",
     headers: {
       accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      origin: "https://www.goofish.com",
       referer: "https://www.goofish.com/",
       ...state.headers,
       cookie: state.cookie,
     },
+    body: `data=${encodeURIComponent(data)}`,
     signal: AbortSignal.timeout(15_000),
   });
 

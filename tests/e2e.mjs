@@ -497,6 +497,211 @@ check(
   ),
 );
 
+// ---------- 7.7 浏览器采集端：本机 API ----------
+// 扩展走的是 HTTP，不是界面，所以这里直接按扩展的方式调一遍。
+const collectorToken = JSON.parse(await readFile(DATA_FILE, "utf8")).state.research
+  .collectorToken;
+check("采集密钥已生成", /^[0-9a-f]{32}$/.test(collectorToken ?? ""));
+
+const taskList = await fetch(
+  `${BASE}/api/research/tasks?token=${encodeURIComponent(collectorToken)}`,
+).then((r) => r.json());
+check("采集端能列出研究任务", taskList.ok && taskList.tasks.length > 0);
+
+const badToken = await fetch(`${BASE}/api/research/tasks?token=deadbeef`);
+check("密钥不对就拒绝列任务", badToken.status === 401, String(badToken.status));
+
+async function postSnapshot(body) {
+  const response = await fetch(`${BASE}/api/research/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json().catch(() => ({})) };
+}
+
+// 扩展在商详页采到的形态：dom 层字段 + 可见文字。
+// 用一件前面没碰过的商品，免得撞上 10 分钟去重窗口。
+const collected = await postSnapshot({
+  token: collectorToken,
+  taskId: taskList.tasks[0].id,
+  snapshot: {
+    capturedAt: new Date().toISOString(),
+    pageUrl: "https://www.goofish.com/item?id=900901",
+    pageType: "detail",
+    dom: {
+      itemId: "900901",
+      title: "Switch OLED 白色 国行 带塞尔达卡带 包邮",
+      wants: 104,
+      price: 1699,
+    },
+    visibleText: "104人想要 · 包邮 · 九成新",
+  },
+});
+check(
+  "采集端投商详快照会入库",
+  collected.status === 200 &&
+    /新增 1 件同行商品/.test(collected.body.message) &&
+    /记录 1 条观察/.test(collected.body.message),
+  collected.body.message,
+);
+
+// 搜索页一次铺多张卡片，抽不到「想要」的如实报出来
+const bulk = await postSnapshot({
+  token: collectorToken,
+  taskId: taskList.tasks[0].id,
+  snapshot: {
+    capturedAt: new Date().toISOString(),
+    pageUrl: "https://www.goofish.com/search?q=switch+oled",
+    pageType: "search",
+    items: [
+      {
+        layer: "dom",
+        itemId: "900801",
+        title: "Switch OLED 白色 带塞尔达",
+        price: 1720,
+        visibleText: "18人想要 包邮",
+      },
+      { layer: "dom", itemId: "900802", title: "Switch OLED 港版", price: 1610 },
+    ],
+  },
+});
+check(
+  "采集端投搜索页会一次铺多件",
+  bulk.status === 200 && /新增 2 件同行商品/.test(bulk.body.message),
+  bulk.body.message,
+);
+check("抽不到「想要」的卡片如实报出来", /1 条没抽到「想要」/.test(bulk.body.message));
+
+const wrongToken = await postSnapshot({ token: "nope", taskId: "RT001", snapshot: {} });
+check("密钥不对就拒绝入库", wrongToken.status === 401, String(wrongToken.status));
+
+const noSnapshot = await postSnapshot({ token: collectorToken, taskId: "RT001" });
+check(
+  "缺快照时说清缺什么",
+  noSnapshot.status === 400 && /缺少页面快照/.test(noSnapshot.body.message),
+  noSnapshot.body.message,
+);
+
+const unknownPage = await postSnapshot({
+  token: collectorToken,
+  taskId: taskList.tasks[0].id,
+  snapshot: { pageUrl: "https://www.goofish.com/personal" },
+});
+check(
+  "认不出商品时先说这个原因",
+  unknownPage.status === 422 && /没认出任何商品/.test(unknownPage.body.message),
+  unknownPage.body.message,
+);
+
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+const afterCollector = await text();
+check("采集端投的观察出现在页面上", afterCollector.includes("104"));
+check("页面上有采集端配对信息", /浏览器采集端/.test(afterCollector));
+
+// ---------- 7.8 采集端读页面的那段代码 ----------
+// 对着本地伪造的页面跑，不碰真实的闲鱼 —— 真站点上跑自动化正是这套设计要避免的事。
+// 拦掉请求本地应答，所以这里一个字节都不会发到 goofish.com。
+const DETAIL_FIXTURE = `<!doctype html><html lang="zh-CN"><body>
+  <h1>Nintendo Switch OLED 白色 主机 带塞尔达卡带</h1>
+  <div class="price">¥1,699.00</div>
+  <div class="meta">86人想要 · 包邮 · 九成新</div>
+</body></html>`;
+
+const SEARCH_FIXTURE = `<!doctype html><html lang="zh-CN"><body>
+  <div class="feed">
+    <div class="card">
+      <a href="https://www.goofish.com/item?id=700001">
+        <img alt="cover" />
+      </a>
+      <div>Switch OLED 白色 带塞尔达王国之泪</div>
+      <div>¥1,720</div>
+      <div>18人想要 包邮</div>
+    </div>
+    <div class="card">
+      <a href="https://www.goofish.com/item?id=700002">
+        <img alt="cover" />
+      </a>
+      <div>Switch OLED 港版 单主机</div>
+      <div>¥1,610</div>
+    </div>
+  </div>
+</body></html>`;
+
+await page.route("https://www.goofish.com/**", (route) => {
+  const url = route.request().url();
+  route.fulfill({
+    status: 200,
+    contentType: "text/html; charset=utf-8",
+    body: url.includes("/item") ? DETAIL_FIXTURE : SEARCH_FIXTURE,
+  });
+});
+
+/** 把 collect.js 塞进页面里跑一遍，返回它拼出来的快照。 */
+async function runCollector(url) {
+  await page.goto(url, { waitUntil: "domcontentloaded" });
+  // collect.js 结尾要注册消息监听，页面里没有扩展 API，给个空壳
+  await page.evaluate(() => {
+    window.chrome = { runtime: { onMessage: { addListener: () => {} } } };
+  });
+  await page.addScriptTag({ path: "tools/xianyu-collector/collect.js" });
+  return page.evaluate(() => buildSnapshot());
+}
+
+const detailSnapshot = await runCollector("https://www.goofish.com/item?id=999123");
+check("采集端认出这是商详页", detailSnapshot.ok && detailSnapshot.snapshot.pageType === "detail");
+check(
+  "采集端从商详页读出 id / 想要 / 价格",
+  detailSnapshot.snapshot?.dom?.itemId === "999123" &&
+    detailSnapshot.snapshot?.dom?.wants === 86 &&
+    detailSnapshot.snapshot?.dom?.price === 1699,
+  JSON.stringify(detailSnapshot.snapshot?.dom),
+);
+check(
+  "采集端带上可见文字当证据",
+  /86人想要/.test(detailSnapshot.snapshot?.visibleText ?? ""),
+);
+check(
+  "页面没有接口响应时不编一个 api 层",
+  detailSnapshot.snapshot?.api === undefined,
+);
+
+const searchSnapshot = await runCollector("https://www.goofish.com/search?q=switch+oled");
+check(
+  "采集端认出这是搜索页并铺出卡片",
+  searchSnapshot.ok && searchSnapshot.snapshot.items?.length === 2,
+  `${searchSnapshot.snapshot?.items?.length ?? 0} cards`,
+);
+const [firstCard, secondCard] = searchSnapshot.snapshot?.items ?? [];
+check(
+  "卡片带 itemId / 标题 / 价格 / 想要，并标成 dom 层",
+  firstCard?.itemId === "700001" &&
+    firstCard?.layer === "dom" &&
+    firstCard?.price === 1720 &&
+    firstCard?.wants === 18 &&
+    /Switch OLED/.test(firstCard?.title ?? ""),
+  JSON.stringify(firstCard),
+);
+check(
+  "卡片上没有「想要」就不给这个字段",
+  secondCard?.itemId === "700002" && secondCard?.wants === undefined,
+  JSON.stringify(secondCard),
+);
+
+// 把采到的两张卡片真的投进去，验证采集端 → API → 入库整条路是通的
+const fromCollector = await postSnapshot({
+  token: collectorToken,
+  taskId: taskList.tasks[0].id,
+  snapshot: searchSnapshot.snapshot,
+});
+check(
+  "采集端真采到的快照能直接入库",
+  fromCollector.status === 200 && /新增 2 件同行商品/.test(fromCollector.body.message),
+  fromCollector.body.message,
+);
+
+await page.unroute("https://www.goofish.com/**");
+
 // ---------- 8. mobile ----------
 // 等提示条自己消失，否则窄屏下它会盖住顶部的菜单按钮
 await page

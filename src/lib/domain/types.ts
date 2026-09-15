@@ -343,6 +343,13 @@ export interface ResearchTask {
 export interface ResearchState {
   tasks: ResearchTask[];
   rivals: RivalListing[];
+  /**
+   * 浏览器采集端往本机 API 投快照时用的配对密钥。
+   *
+   * `localhost` 对任何网页都是可达的，没有密钥的话你随便打开的某个网站
+   * 也能往研究里塞脏数据。它不是平台凭证 —— 既不能登录闲鱼，也动不了你的商品。
+   */
+  collectorToken?: string;
 }
 
 /** 一次平台同步拉回来的快照。 */

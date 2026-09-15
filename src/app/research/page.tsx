@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CollectorCard } from "@/components/collector-card";
 import { ResearchPanel } from "@/components/research-panel";
 import { ResearchTaskDialog } from "@/components/research-task-dialog";
 import { StatCard } from "@/components/stat-card";
@@ -12,8 +13,9 @@ import {
 } from "@/components/ui/card";
 import { nowMs, relativeTime, yuan } from "@/lib/format";
 import { findingsFor, priceBand, revisitQueue } from "@/lib/research/analysis";
+import { ensureCollectorToken } from "@/lib/research/collector";
 import { lastObservedAt } from "@/lib/research/record";
-import { getState } from "@/lib/store";
+import { getState, mutateState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +26,10 @@ export default async function ResearchPage({
   const state = await getState();
   const now = nowMs();
   const requested = (await searchParams).task;
+
+  // v1.4 之前的状态里没有这个字段，补一次就行，不用每次进页面都写盘
+  const collectorToken =
+    state.research.collectorToken ?? (await mutateState(ensureCollectorToken));
 
   const tasks = state.research.tasks;
   const task =
@@ -257,6 +263,8 @@ export default async function ResearchPage({
         listings={state.listings}
         now={now}
       />
+
+      <CollectorCard token={collectorToken} />
     </div>
   );
 }

@@ -232,7 +232,32 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 由此有一个必须接受的事实：**时间线的密度等于你回访的密度。** 所以「监测」在这里
 被定义成一份**回访清单**，而不是爬虫 —— 打开页面的动作由你做。
 
-快照格式和登录态导出同一路（外部采集 → 本机解析），粘贴进「导入页面快照」即可：
+### 采集端：一个按钮，不用手动粘贴
+
+`tools/xianyu-collector` 是配套的 Chrome 扩展：在闲鱼的商品详情页或搜索结果页上
+点一下，当前页就进研究里了。装法看
+[它的 README](tools/xianyu-collector/README.md)，三步：
+
+```bash
+npm run dev                                  # 1. 应用跑起来
+# 2. 打开 /research，在页面底部「浏览器采集端」复制采集密钥
+# 3. chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → 选 tools/xianyu-collector
+```
+
+扩展做的事只有旁听：记下页面**自己已经发出并拿回来**的响应、读页面内嵌的初始 JSON、
+读可见的文字。**不预取、不轮询、不翻页**，不改请求也不碰 cookie，只 POST 到你自己填的
+那个 `localhost` 地址。
+
+采集密钥是因为 `localhost` 对任何网页都是可达的 —— 没有它，你随便打开的某个网站也能
+往你的研究里塞脏数据。它**不是**平台凭证：既不能登录闲鱼，也动不了你的商品。
+想换就在界面上点「换一把密钥」。
+
+搜索结果页点一下会把当页所有卡片一次性加进来，适合开局批量铺同行；之后要盯的那几件
+还是得进商详页点，因为趋势只按商详对商详算。
+
+### 快照格式
+
+不想装扩展也行 —— 手动粘贴进「导入页面快照」，格式一样：
 
 ```json
 {
@@ -241,6 +266,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
   "pageType": "detail",
   "api":       { "data": { "itemDO": { "itemId": "812345001", "wantCnt": 97 } } },
   "hydration": { },
+  "dom":       { "itemId": "812345001", "wants": 97, "price": 1699 },
   "visibleText": "97人想要 · 包邮 · 九成新"
 }
 ```
@@ -253,7 +279,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 | --- | --- | --- |
 | `api` | 你打开页面时，页面**自己已经拉回来**的响应 | 最稳。不新开请求，只读已经发生的响应 |
 | `hydration` | 页面里内嵌的初始 JSON | 次之 |
-| `dom` | 当前页面上可见的文字，如 `86人想要` | 兜底。命中的原文片段进证据，方便点回去核对 |
+| `dom` | 采集端从页面上读到的字段，以及可见文字里的 `86人想要` | 兜底。命中的原文片段进证据，方便点回去核对 |
 
 界面上每个数字都标着它是哪一层给的。截图可以当人眼核对的附件，但**不用来 OCR 出数字**。
 
@@ -295,7 +321,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析、选品研究，190 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析、选品研究，197 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
@@ -304,8 +330,8 @@ npm run test:e2e    # 浏览器冒烟测试（需要先起服务，见下）
 ```
 
 `npm run test:e2e` 用 `playwright-core` 驱动本机已装的 Chrome，把审批、回复、擦亮、
-发货、规则开关、选品研究和移动端布局跑一遍（77 项）。它会先点一次「重置示例数据」，
-所以可以重复运行：
+发货、规则开关、选品研究、采集端 API 和移动端布局跑一遍（96 项）。它会先点一次
+「重置示例数据」，所以可以重复运行：
 
 ```bash
 npm run build && npm run start &   # 或者 npm run dev
@@ -317,11 +343,16 @@ CHROME_PATH=/path/to/chrome npm run test:e2e   # Chrome 不在默认位置时
 
 ### 目录结构
 
+采集端读页面那段代码（`tools/xianyu-collector/collect.js`）也在 e2e 里跑，
+但是对着**本地伪造的页面**跑 —— 拦掉请求本地应答，一个字节都不会发到 goofish.com。
+在真站点上跑自动化，正是这套设计要避免的事。
+
 ```
 src/
 ├── instrumentation.ts      服务端启动时把后台巡检跑起来
 ├── app/                    页面（Server Components）与 Server Actions
 │   ├── actions.ts          所有写操作的入口
+│   ├── api/research/       采集端投快照的本机接口（密钥校验）
 │   ├── page.tsx            总览
 │   ├── queue/              行动队列
 │   ├── inbox/              消息
@@ -346,7 +377,8 @@ src/
     ├── research/           选品研究（和本店商品完全分开）
     │   ├── snapshot.ts     页面快照解析：三层抽取
     │   ├── record.ts       按 itemId 追加观察、短时去重、规格对齐
-    │   └── analysis.ts     想要趋势、价格带、回访清单、带证据的结论
+    │   ├── analysis.ts     想要趋势、价格带、回访清单、带证据的结论
+    │   └── collector.ts    采集端配对密钥与请求校验
     ├── agent/
     │   ├── engine.ts       规则引擎：状态 + 时间 → 建议
     │   ├── reply.ts        意图识别与回复起草
@@ -356,6 +388,7 @@ src/
     │   └── llm.ts          可选的 LLM 润色
     └── store.ts            JSON 文件存储
 tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
+tools/xianyu-collector/     浏览器采集端（Chrome 扩展，只读当前页）
 scripts/screenshots.mjs     重新生成 README 截图
 scripts/xianyu-probe.mjs    接口名探测与排查
 scripts/xianyu-login.mjs    导入 / 验证 / 清除登录态

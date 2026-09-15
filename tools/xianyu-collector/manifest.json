@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "闲鱼选品研究采集端",
+  "version": "1.0.0",
+  "description": "在闲鱼页面上点一下，把当前页已经显示出来的公开数据投进本机的「选品研究」。只读当前页，不替你请求任何别的页面。",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://*.goofish.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "加入研究"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.goofish.com/*"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.goofish.com/*"],
+      "js": ["collect.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

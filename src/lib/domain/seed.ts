@@ -1,4 +1,5 @@
 import { mulberry32 } from "@/lib/random";
+import { newCollectorToken } from "@/lib/research/collector";
 import type {
   ActivityEntry,
   AppState,
@@ -672,7 +673,7 @@ function buildResearch(now: number): ResearchState {
     },
   ];
 
-  return { tasks: [task], rivals };
+  return { tasks: [task], rivals, collectorToken: newCollectorToken() };
 }
 
 export function createSeedState(now = Date.now()): AppState {

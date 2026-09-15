@@ -9,6 +9,12 @@ import {
   wantsTrend,
 } from "@/lib/research/analysis";
 import {
+  ensureCollectorToken,
+  newCollectorToken,
+  parseImportBody,
+  verifyCollectorToken,
+} from "@/lib/research/collector";
+import {
   DEDUPE_WINDOW_MS,
   alignmentFor,
   describeRecord,
@@ -137,6 +143,15 @@ describe("快照解析：三层抽取", () => {
     expect(parsed.skipped).toBe(1);
   });
 
+  it("认不出商品时，这条原因排在其它提醒前面", () => {
+    const parsed = parsePageSnapshot({ pageUrl: "https://www.goofish.com/personal" }, NOW);
+
+    expect(parsed.items).toHaveLength(0);
+    // 「没有 capturedAt」只是提醒，挡住入库的是认不出商品
+    expect(parsed.warnings[0]).toContain("没认出任何商品");
+    expect(parsed.warnings.some((w) => w.includes("capturedAt"))).toBe(true);
+  });
+
   it("不是合法 JSON 时给出人话提示，而不是抛异常", () => {
     const parsed = parsePageSnapshot("{不是 json", NOW);
     expect(parsed.items).toHaveLength(0);
@@ -164,6 +179,92 @@ describe("快照解析：三层抽取", () => {
     expect(parsed.items[0].wantsFrom).toBe("dom");
     // 整页文字不能归给某一张卡片
     expect(parsed.items[1].wants).toBeUndefined();
+  });
+});
+
+describe("快照解析：采集端读到的 DOM 字段", () => {
+  it("接口和内嵌 JSON 都没有时，用采集端读的字段，并记成 dom 层", () => {
+    const parsed = parsePageSnapshot(
+      snapshotAt(0, {
+        dom: { itemId: "900001", title: "Switch OLED 白色", wants: 71, price: 1666 },
+        visibleText: "71人想要 · 包邮",
+      }),
+      NOW,
+    );
+
+    const [item] = parsed.items;
+    expect(item.wants).toBe(71);
+    expect(item.wantsFrom).toBe("dom");
+    expect(item.priceCents).toBe(166600);
+    expect(item.priceFrom).toBe("dom");
+    expect(item.delivery).toBe("free_shipping");
+  });
+
+  it("页面接口有的字段，不会被采集端读的值顶掉", () => {
+    const parsed = parsePageSnapshot(
+      snapshotAt(0, {
+        api: { data: { itemDO: { itemId: "900001", title: "Switch OLED", wantCnt: 88 } } },
+        dom: { itemId: "900001", wants: 71, price: 1666 },
+      }),
+      NOW,
+    );
+
+    const [item] = parsed.items;
+    expect(item.wants).toBe(88);
+    expect(item.wantsFrom).toBe("api");
+    // 接口里没有价格，这一项才轮到采集端
+    expect(item.priceCents).toBe(166600);
+    expect(item.priceFrom).toBe("dom");
+  });
+});
+
+describe("采集端配对密钥", () => {
+  it("生成的是够长的随机串，两次不会一样", () => {
+    const a = newCollectorToken();
+    const b = newCollectorToken();
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(a).not.toBe(b);
+  });
+
+  it("只认一模一样的密钥", () => {
+    const token = newCollectorToken();
+    expect(verifyCollectorToken(token, token)).toBe(true);
+    expect(verifyCollectorToken(token, `${token}x`)).toBe(false);
+    expect(verifyCollectorToken(token, token.slice(0, -1))).toBe(false);
+    expect(verifyCollectorToken(token, undefined)).toBe(false);
+    expect(verifyCollectorToken(token, null)).toBe(false);
+  });
+
+  it("老状态里没有密钥就补一个，已有的不动", () => {
+    const state = createSeedState(NOW);
+    const seeded = state.research.collectorToken;
+    expect(seeded).toMatch(/^[0-9a-f]{32}$/);
+    expect(ensureCollectorToken(state)).toBe(seeded);
+
+    delete state.research.collectorToken;
+    const added = ensureCollectorToken(state);
+    expect(added).toMatch(/^[0-9a-f]{32}$/);
+    expect(state.research.collectorToken).toBe(added);
+  });
+
+  it("请求体缺什么就说缺什么", () => {
+    expect(parseImportBody(null).ok).toBe(false);
+    expect(parseImportBody({ taskId: "T", snapshot: {} })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("密钥"),
+    });
+    expect(parseImportBody({ token: "t", snapshot: {} })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("任务"),
+    });
+    expect(parseImportBody({ token: "t", taskId: "T" })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("快照"),
+    });
+    expect(parseImportBody({ token: "t", taskId: "T", snapshot: { a: 1 } })).toMatchObject({
+      ok: true,
+      value: { token: "t", taskId: "T" },
+    });
   });
 });
 

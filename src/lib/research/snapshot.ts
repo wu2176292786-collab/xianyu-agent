@@ -20,6 +20,7 @@ import type {
  *   "pageType": "detail",
  *   "api":       { … },   // 页面自己已经拉回来的响应，最稳
  *   "hydration": { … },   // 页里内嵌的初始 JSON
+ *   "dom":       { … },   // 采集端从 DOM 上读到的结构化字段
  *   "visibleText": "86人想要 · 包邮",   // 当前可见的文字，兜底
  *   "items": [ … ]        // 搜索页的卡片，每张可以自带 layer
  * }
@@ -31,6 +32,8 @@ export interface PageSnapshot {
   pageType?: ObservationSource;
   api?: unknown;
   hydration?: unknown;
+  /** 采集端从 DOM 上读出来的字段。层级记成 dom —— 它确实只是页面上的字。 */
+  dom?: unknown;
   visibleText?: string;
   items?: unknown[];
 }
@@ -85,6 +88,7 @@ const SELLER_PATHS = [
   "data.sellerDO.userNick",
   "cardData.userNickName",
   "sellerNick",
+  "seller",
   "nick",
 ];
 
@@ -97,6 +101,8 @@ const WANTS_PATHS = [
   "collectCount",
   "collectNum",
   "wantCount",
+  // 采集端从页面上读出来的字段用这个朴素的名字
+  "wants",
 ];
 
 const PRICE_YUAN_PATHS = [
@@ -401,11 +407,15 @@ export function parsePageSnapshot(raw: unknown, now: number): ParseResult {
       else skipped += 1;
     }
   } else {
+    // 顺序就是可信度：页面接口 → 内嵌 JSON → 采集端从 DOM 读到的字段
     const layers: Layered[] = [];
     if (snapshot.api !== undefined)
       layers.push({ record: snapshot.api, layer: "api" });
     if (snapshot.hydration !== undefined) {
       layers.push({ record: snapshot.hydration, layer: "hydration" });
+    }
+    if (snapshot.dom !== undefined) {
+      layers.push({ record: snapshot.dom, layer: "dom" });
     }
 
     const item = buildItem({ layers, visibleText, pageUrl, at, source });
@@ -413,8 +423,9 @@ export function parsePageSnapshot(raw: unknown, now: number): ParseResult {
     else skipped += 1;
   }
 
-  if (items.length === 0 && warnings.length === 0) {
-    warnings.push(
+  if (items.length === 0) {
+    // 这是挡住入库的那个问题，得排在「没有 capturedAt」这类提醒前面
+    warnings.unshift(
       "这份快照里没认出任何商品，确认一下是不是在商详或搜索结果页采集的。",
     );
   }

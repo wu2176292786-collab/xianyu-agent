@@ -22,6 +22,7 @@ import { describeMerge, mergeSnapshot } from "@/lib/agent/sync";
 import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
 import { INTENT_LABEL, draftReply } from "@/lib/agent/reply";
+import { newCollectorToken } from "@/lib/research/collector";
 import { alignmentFor, describeRecord, recordObservations } from "@/lib/research/record";
 import { parsePageSnapshot } from "@/lib/research/snapshot";
 import {
@@ -729,6 +730,24 @@ export async function setRivalAlignment(
     rival.alignment = alignment;
     rival.alignmentBy = "human";
     return { ok: true, message: `已标记为「${ALIGNMENT_LABEL[alignment]}」。` };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+/**
+ * 换一把采集密钥。
+ *
+ * 密钥泄露了、或者你不想让某个装过扩展的浏览器再投数据，就换一把 ——
+ * 换完所有采集端都得重新填。
+ */
+export async function regenerateCollectorToken(): Promise<ActionResponse> {
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    state.research.collectorToken = newCollectorToken();
+    logActivity(state, "human", "重新生成了采集密钥，采集端需要重新填。", now);
+    return { ok: true, message: "已换一把新密钥，记得更新扩展里的设置。" };
   });
 
   revalidateAll();

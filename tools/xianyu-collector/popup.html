@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 12px;
+        font-size: 13px;
+        color: #18181b;
+      }
+      h1 {
+        margin: 0 0 2px;
+        font-size: 14px;
+      }
+      p.hint {
+        margin: 0 0 10px;
+        color: #71717a;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      label {
+        display: block;
+        margin-bottom: 4px;
+        color: #71717a;
+        font-size: 12px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        border: 1px solid #e4e4e7;
+        border-radius: 6px;
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .row {
+        margin-bottom: 8px;
+      }
+      button {
+        width: 100%;
+        padding: 8px;
+        border: 0;
+        border-radius: 6px;
+        background: #18181b;
+        color: #fafafa;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button.secondary {
+        background: #f4f4f5;
+        color: #18181b;
+      }
+      .tasks {
+        max-height: 140px;
+        overflow: auto;
+        margin-bottom: 8px;
+      }
+      .task {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        padding: 7px 8px;
+        margin-bottom: 4px;
+        border: 1px solid #e4e4e7;
+        border-radius: 6px;
+        background: #fff;
+        text-align: left;
+        color: #18181b;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .task[data-active="true"] {
+        border-color: #18181b;
+        background: #f4f4f5;
+      }
+      .task small {
+        color: #71717a;
+      }
+      #message {
+        margin-top: 10px;
+        padding: 8px;
+        border-radius: 6px;
+        background: #f4f4f5;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      #message[data-tone="error"] {
+        background: #fef2f2;
+        color: #991b1b;
+      }
+      #message[data-tone="ok"] {
+        background: #f0fdf4;
+        color: #166534;
+      }
+      details {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #71717a;
+      }
+      summary {
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>加入研究</h1>
+    <p class="hint">
+      只读当前页面上已经显示出来的内容，不会替你去请求别的页面。
+    </p>
+
+    <div id="setup" hidden>
+      <div class="row">
+        <label for="endpoint">应用地址</label>
+        <input id="endpoint" value="http://localhost:43117" />
+      </div>
+      <div class="row">
+        <label for="token">采集密钥（在「选品研究」页面底部复制）</label>
+        <input id="token" placeholder="32 位十六进制" />
+      </div>
+      <button id="save">保存并连接</button>
+    </div>
+
+    <div id="main" hidden>
+      <label>投到哪个研究任务</label>
+      <div class="tasks" id="tasks"></div>
+      <button id="collect" disabled>把当前页加入研究</button>
+      <details>
+        <summary>设置</summary>
+        <p id="current"></p>
+        <button class="secondary" id="edit">改地址或密钥</button>
+      </details>
+    </div>
+
+    <div id="message" hidden></div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

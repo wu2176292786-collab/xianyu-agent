@@ -2,6 +2,15 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/**
+ * 所有时间都按北京时间显示。
+ *
+ * 不写死时区的话，服务端（UTC）和浏览器（本地时区）会渲染出不一样的字符串，
+ * hydration 直接报错。而且对闲鱼卖家来说，「几点下的单」本来就该是北京时间，
+ * 不该跟着看页面的人所在的时区变。
+ */
+const SHOP_TIME_ZONE = "Asia/Shanghai";
+
 /** 分 → 「¥1,234.00」 */
 export function yuan(cents: number): string {
   return `¥${(cents / 100).toLocaleString("zh-CN", {
@@ -37,7 +46,7 @@ export function relativeTime(iso: string, now = nowMs()): string {
   if (diff < HOUR) return `${Math.floor(diff / MINUTE)} 分钟前`;
   if (diff < DAY) return `${Math.floor(diff / HOUR)} 小时前`;
   if (diff < 30 * DAY) return `${Math.floor(diff / DAY)} 天前`;
-  return new Date(iso).toLocaleDateString("zh-CN");
+  return new Date(iso).toLocaleDateString("zh-CN", { timeZone: SHOP_TIME_ZONE });
 }
 
 export function hoursSince(iso: string, now: number): number {
@@ -50,6 +59,7 @@ export function daysSince(iso: string, now: number): number {
 
 export function clockTime(iso: string): string {
   return new Date(iso).toLocaleString("zh-CN", {
+    timeZone: SHOP_TIME_ZONE,
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

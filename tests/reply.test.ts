@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   awaitingSellerReply,
   classifyIntent,
@@ -7,6 +7,7 @@ import {
   lowestQuoteCents,
 } from "@/lib/agent/reply";
 import { createSeedState } from "@/lib/domain/seed";
+import { clockTime, relativeTime } from "@/lib/format";
 import type { Conversation, Listing, ShopSettings } from "@/lib/domain/types";
 
 const NOW = Date.parse("2026-01-10T12:00:00.000Z");
@@ -52,6 +53,39 @@ function conversation(text: string, overrides: Partial<Conversation> = {}): Conv
     ...overrides,
   };
 }
+
+describe("时间格式化", () => {
+  // 服务端在 UTC、浏览器在别的时区时，同一个时间戳必须渲染成同一个字符串，
+  // 否则 hydration 会直接报错（/inbox 和 /orders 真的踩过）。
+  const instant = "2026-01-10T12:00:00.000Z";
+  const original = process.env.TZ;
+
+  afterEach(() => {
+    process.env.TZ = original;
+  });
+
+  it.each(["UTC", "Asia/Shanghai", "America/New_York", "Europe/Berlin"])(
+    "在 %s 下 clockTime 都输出北京时间",
+    (tz) => {
+      process.env.TZ = tz;
+      expect(clockTime(instant)).toBe("01/10 20:00");
+    },
+  );
+
+  it("超过 30 天的相对时间也按北京时间渲染", () => {
+    const longAgo = "2026-01-10T16:00:00.000Z"; // 北京时间已经是 1 月 11 日
+    const now = Date.parse("2026-03-20T00:00:00.000Z");
+    process.env.TZ = "America/New_York";
+    expect(relativeTime(longAgo, now)).toBe("2026/1/11");
+  });
+
+  it("一分钟内算刚刚，跨过整分钟才换档", () => {
+    const now = Date.parse(instant);
+    expect(relativeTime(new Date(now - 59_000).toISOString(), now)).toBe("刚刚");
+    expect(relativeTime(new Date(now - 61_000).toISOString(), now)).toBe("1 分钟前");
+    expect(relativeTime(new Date(now - 3 * 3600_000).toISOString(), now)).toBe("3 小时前");
+  });
+});
 
 describe("extractOfferCents", () => {
   it("接受与挂牌价同量级的报价", () => {

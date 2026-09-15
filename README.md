@@ -122,6 +122,13 @@ docs/plans/                 执行计划
 3. 执行失败的动作**不会被悄悄丢掉**，会带着失败原因和尝试次数留在队列里，
    可以原样重试或者改完再试。
 
+### 时间一律按北京时间显示
+
+界面上的「下单 09/14 16:05」这类时间钉死在 `Asia/Shanghai`，不跟着看页面的人所在时区变。
+一是对闲鱼卖家来说这本来就该是北京时间，二是不钉死的话服务端（UTC）和浏览器会渲染出
+不同的字符串，React hydration 会直接报错。`npm run test:e2e` 特意用中国时区的浏览器跑，
+就是为了守住这条。
+
 ## 技术栈
 
 Next.js 16（App Router）· React 19 · TypeScript · Tailwind CSS v4 · shadcn/ui · Vitest

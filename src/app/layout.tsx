@@ -53,6 +53,9 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="zh-CN"
       className={`${sans.variable} ${mono.variable} h-full antialiased`}
+      // 沉浸式翻译这类扩展会在 React 之前往 <html> 上挂属性，
+      // 只压掉这一个标签的属性告警，组件里真正的 hydration 问题照样会报。
+      suppressHydrationWarning
     >
       <body className="min-h-full bg-muted/40">
         <div className="flex min-h-dvh">

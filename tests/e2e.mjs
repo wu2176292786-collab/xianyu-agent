@@ -39,7 +39,13 @@ const browser = await chromium.launch({
   executablePath: CHROME,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+// 故意让浏览器时区和服务端（UTC）不一致：时间格式化只要忘了钉死时区，
+// hydration 就会报错，这里能第一时间抓到。
+const page = await browser.newPage({
+  viewport: { width: 1440, height: 900 },
+  timezoneId: "Asia/Shanghai",
+  locale: "zh-CN",
+});
 
 const pageErrors = [];
 page.on("pageerror", (err) => pageErrors.push(err.message));
@@ -307,6 +313,12 @@ const inboxOverflow = await page.evaluate(
 );
 check("移动端收件箱无横向溢出", inboxOverflow <= 1, `overflow ${inboxOverflow}px`);
 
+const hydrationErrors = pageErrors.filter((e) => /hydrat|didn't match/i.test(e));
+check(
+  "没有 hydration 报错（浏览器时区与服务端不同）",
+  hydrationErrors.length === 0,
+  hydrationErrors[0]?.slice(0, 160) ?? "",
+);
 check("没有页面级 JS 错误", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 
 report();

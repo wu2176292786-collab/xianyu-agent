@@ -10,7 +10,7 @@ import {
 } from "@/lib/agent/engine";
 import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
-import { draftReply } from "@/lib/agent/reply";
+import { INTENT_LABEL, draftReply } from "@/lib/agent/reply";
 import type { AppState } from "@/lib/domain/types";
 import { parseYuanToCents } from "@/lib/format";
 import { getState, logActivity, mutateState, resetState } from "@/lib/store";
@@ -226,9 +226,11 @@ export async function draftReplyFor(conversationId: string): Promise<{
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
 
   const draft = draftReply({ conversation, listing, settings: state.settings, order });
+  // 还价金额是按底价算出来的，模型可以改措辞，但这个数字必须原样留着。
   const polished = await polishReply(
     draft.text,
-    `商品：${listing?.title ?? "未知"}；买家：${conversation.buyerName}；意图：${draft.intent}`,
+    `商品：${listing?.title ?? "未知"}；买家：${conversation.buyerName}；意图：${INTENT_LABEL[draft.intent]}`,
+    { mustKeep: draft.counterOfferCents ? [draft.counterOfferCents / 100] : [] },
   );
 
   return {

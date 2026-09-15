@@ -184,11 +184,16 @@ await page.waitForTimeout(800);
 const threadSecond = await page.locator("main").innerText();
 check("切换会话后对话内容变化", threadFirst !== threadSecond);
 
+// 配了 LLM 之后起草要等模型返回，不能再用固定等待。
 await page.getByRole("button", { name: "让 Agent 起草" }).click();
-await page.waitForTimeout(2500);
 const composer = page.locator("main textarea").first();
-const drafted = await composer.inputValue();
+let drafted = "";
+for (let i = 0; i < 40 && drafted.length === 0; i += 1) {
+  await page.waitForTimeout(500);
+  drafted = await composer.inputValue();
+}
 check("Agent 起草生成草稿", drafted.length > 10, `${drafted.length} chars`);
+check("草稿里没有模型的思考过程", !/<think/i.test(drafted));
 await page.getByRole("button", { name: "发送" }).click();
 await page.waitForTimeout(2500);
 await checkToast("回复发送成功", /已回复/);

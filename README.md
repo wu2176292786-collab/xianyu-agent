@@ -44,15 +44,31 @@ npm run dev
 
 ## 可选：接入 LLM
 
-不配也能用 —— 回复由内置模板生成。配置之后，Agent 会在模板基础上做一次口语化润色，
-调用失败会静默回落到模板：
+不配也能用 —— 回复由内置模板生成。配置之后，收件箱里点「让 Agent 起草」会在模板
+基础上做一次口语化润色，调用失败会静默回落到模板：
 
 ```bash
-# .env.local
+# .env.local（已被 .gitignore 忽略）
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini          # 可选
-OPENAI_BASE_URL=https://api.openai.com/v1   # 可选，兼容 OpenAI 协议的网关都行
+OPENAI_MODEL=gpt-4o-mini                     # 可选
+OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
 ```
+
+任何兼容 OpenAI 协议的网关都能直接用，改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL` 即可
+（MiniMax `https://api.minimaxi.com/v1`、DeepSeek `https://api.deepseek.com/v1` 等都实测可用）。
+
+### 模型只能改措辞，改不了数字
+
+润色结果要过三道关才会被采用，任何一关没过就整段弃用、回落到模板：
+
+1. **剥掉思考块**：MiniMax-M3、DeepSeek-R1 这类推理模型会把 `<think>…</think>` 混在正文里，
+   直接发出去买家就看到了；没闭合说明输出被截断，整段弃用。
+2. **不许出现草稿里没有的数字**：模型编一个「最低 3500」出来，底价保护就白做了。
+   这一关只看数值不看写法，所以「¥3,850.00」被改写成「3850」或「3,850 元」都算通过，
+   但把「24 小时内发出」改成「48 小时」会被拦下。
+3. **还价必须保住**：按底价算出来的那个数字少了就弃用。
+
+回落的代价只是话说得官方一点，放过一个编出来的低价代价是真金白银 —— 所以宁可多回落。
 
 ## 关于真实账号
 
@@ -66,7 +82,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1   # 可选，兼容 OpenAI 协议的�
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎 + 回复起草 + 调度与失败处理，54 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、失败处理、模型输出校验，71 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑

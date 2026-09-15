@@ -306,6 +306,21 @@ await clickUntil(
 );
 await checkToast("从平台同步可用", /同步完成/);
 
+// 真实读通道的状态面板。这里**只切换不同步** —— 自动化测试绝不能去碰真实账号。
+await clickUntil(
+  page.locator("button").filter({ hasText: "真实闲鱼账号" }).first(),
+  page.locator("text=商品接口：").first(),
+);
+const livePanel = await text();
+check("切到真实读通道会显示凭证状态", /凭证：/.test(livePanel));
+check("没导入登录态时如实说没导入", /还没有导入登录态|游客/.test(livePanel));
+check("未配置的接口如实标出来", /未配置（同步时会保留本地/.test(livePanel));
+
+await clickUntil(
+  page.locator("button").filter({ hasText: "本地模拟数据" }).first(),
+  page.locator("[data-sonner-toast]").first(),
+);
+
 // 切到演练模式
 await clickUntil(
   page.locator("button").filter({ hasText: "演练（只记录不执行）" }).first(),

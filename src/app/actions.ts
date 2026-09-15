@@ -574,7 +574,7 @@ export interface LiveChannelStatus {
  * 只返回「有没有配」和诊断文字，绝不把 cookie 本身传到浏览器。
  */
 export async function liveChannelStatus(): Promise<LiveChannelStatus> {
-  return { credentials: credentialStatus(), endpoints: endpointConfig() };
+  return { credentials: await credentialStatus(), endpoints: endpointConfig() };
 }
 
 export async function resetDemoData(): Promise<ActionResponse> {

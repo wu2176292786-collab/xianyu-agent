@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { inspectCookie, redactCookie } from "@/lib/adapters/live/credentials";
+import { inspectLoginState } from "@/lib/adapters/live/credentials";
+import { describeLoginState, parseLoginState } from "@/lib/adapters/live/login-state";
 import {
   backoffMs,
   buildRequestUrl,
@@ -135,14 +136,17 @@ describe("cookie 合并", () => {
 });
 
 describe("凭证检查", () => {
-  it("没配就明确说没配", () => {
-    const status = inspectCookie("");
+  const of = (cookie: string, headers: Record<string, string> = {}) =>
+    inspectLoginState({ cookie, headers });
+
+  it("没导入就明确说没导入", () => {
+    const status = inspectLoginState(null);
     expect(status.configured).toBe(false);
-    expect(status.detail).toContain("没有配置");
+    expect(status.detail).toContain("还没有导入");
   });
 
   it("只有游客 cookie 时会指出来", () => {
-    const status = inspectCookie("_m_h5_tk=abc_123; cna=xyz");
+    const status = of("_m_h5_tk=abc_123; cna=xyz");
     expect(status.configured).toBe(true);
     expect(status.hasToken).toBe(true);
     expect(status.hasSession).toBe(false);
@@ -150,18 +154,27 @@ describe("凭证检查", () => {
   });
 
   it("有登录态字段就算齐全", () => {
-    const status = inspectCookie("unb=999; cookie2=abc; _m_h5_tk=tok_1");
+    const status = of("unb=999; cookie2=abc; _m_h5_tk=tok_1", {
+      "user-agent": "Mozilla/5.0",
+    });
     expect(status.hasSession).toBe(true);
     expect(status.hasToken).toBe(true);
+    expect(status.hasUserAgent).toBe(true);
+  });
+
+  it("缺 User-Agent 会明确提醒 —— 请求头和 cookie 不一致容易触发风控", () => {
+    const status = of("unb=999; cookie2=abc; _m_h5_tk=tok_1");
+    expect(status.hasUserAgent).toBe(false);
+    expect(status.detail).toContain("风控");
   });
 
   it("脱敏之后不能泄漏任何值", () => {
-    const cookie = "unb=SECRET123; cookie2=ALSOSECRET; _m_h5_tk=tok_1";
-    const redacted = redactCookie(cookie);
-    expect(redacted).not.toContain("SECRET123");
-    expect(redacted).not.toContain("ALSOSECRET");
-    expect(redacted).toContain("unb");
-    expect(redacted).toContain("3 个字段");
+    const described = describeLoginState(
+      parseLoginState("unb=SECRET123; cookie2=ALSOSECRET; _m_h5_tk=tok_1"),
+    );
+    expect(described).not.toContain("SECRET123");
+    expect(described).not.toContain("ALSOSECRET");
+    expect(described).toContain("3 个 cookie 字段");
   });
 });
 
@@ -189,9 +202,33 @@ describe("callMtop", () => {
     return { impl, calls };
   }
 
-  it("没配 cookie 时直接抛出未配置错误", async () => {
+  it("没导入登录态时直接抛出未配置错误", async () => {
     delete process.env.XIANYU_COOKIE;
-    await expect(callMtop({ api: "mtop.x" })).rejects.toThrow("XIANYU_COOKIE");
+    await expect(callMtop({ api: "mtop.x" })).rejects.toThrow("还没有导入登录态");
+  });
+
+  it("请求会带上导出时抓到的请求头", async () => {
+    let seenHeaders: Record<string, string> = {};
+    const impl = (async (_url: string, init: { headers: Record<string, string> }) => {
+      seenHeaders = init.headers;
+      return {
+        headers: { get: () => null },
+        json: async () => ({ ret: ["SUCCESS::ok"], data: {} }),
+      };
+    }) as unknown as typeof fetch;
+
+    await callMtop({
+      api: "mtop.x",
+      fetchImpl: impl,
+      loginState: {
+        cookie: "unb=1; _m_h5_tk=tok_1",
+        headers: { "user-agent": "从扩展抓到的 UA", "sec-ch-ua-platform": '"macOS"' },
+      },
+    });
+
+    expect(seenHeaders["user-agent"]).toBe("从扩展抓到的 UA");
+    expect(seenHeaders["sec-ch-ua-platform"]).toBe('"macOS"');
+    expect(seenHeaders.cookie).toBe("unb=1; _m_h5_tk=tok_1");
   });
 
   it("成功就一次返回，不会多打请求", async () => {

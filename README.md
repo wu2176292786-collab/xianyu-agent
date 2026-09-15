@@ -111,18 +111,48 @@ GET https://h5api.m.goofish.com/h5/{api}/{version}/?appKey=12574478&t=…&sign=�
 → {"api":"…","ret":["SUCCESS::接口调用成功"],"data":{…}}
 ```
 
-#### 配置
+#### 导入登录态
+
+最省事的办法是配合 Chrome 扩展
+[Xianyu Login State Extractor](https://chromewebstore.google.com/detail/xianyu-login-state-extrac/eidlpfjiodpigmfcahkmlenhppfklcoa)：
 
 ```bash
-# .env.local（已被 .gitignore 忽略，绝不要提交或贴给别人）
+# 1. 浏览器登录 www.goofish.com，点扩展 → 勾选同意 → 提取（内容进剪贴板）
+# 2. 回终端粘贴，Ctrl-D 结束
+npm run xianyu:login
+
+# 顺带真的调一次网关验证登录态是不是活的
+npm run xianyu:login -- --verify
+
+npm run xianyu:login -- --status    # 看当前状态
+npm run xianyu:login -- --clear     # 删掉
+```
+
+导入的内容存在 `.secrets/xianyu-login-state.json`，权限 `600`，目录已在 `.gitignore` 里。
+
+**为什么推荐这个扩展，而不是只手抄 cookie：** 它会把 cookie 和当时的**请求头**
+（User-Agent / Accept-Language / Sec-CH-UA 等）一起导出。cookie 是在某个具体浏览器里
+登录出来的，拿着它却用另一套 User-Agent 去请求，这种不一致本身就是风控的典型触发条件。
+导入的请求头会原样带到每一次请求上。
+
+> ⚠️ 这是第三方扩展，作者身份不明。商店页面声明数据只在本地生成、不上传，但你应该
+> 自己判断是否可信。稳妥的用法是：用完就把扩展停用或删掉。**导出的内容等同于你的账号，
+> 不要发给任何人，也不要贴进任何对话框。**
+
+手抄也行，扩展只是省事：
+
+```bash
+# .env.local（环境变量优先级高于 .secrets/ 里的文件）
 XIANYU_COOKIE=整条 cookie 串
+XIANYU_USER_AGENT=你浏览器的 User-Agent   # 强烈建议一起配
+```
+
+#### 接口名配置
+
+```bash
 XIANYU_API_ORDERS=mtop.xxx            # 可选，没配就保留本地订单
 XIANYU_API_CONVERSATIONS=mtop.xxx     # 可选，没配就保留本地会话
 ```
-
-拿 cookie 的方法：浏览器登录 `www.goofish.com` → F12 → Network → 随便点一个
-`h5api.m.goofish.com` 的请求 → 复制请求头里的整条 `Cookie`。
-**这串东西等同于你的账号。**
 
 #### 排查工具
 
@@ -153,8 +183,10 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 - **登录失效绝不重试**：重试也没用，直接告诉你要重新扫码。
 - **限流退避重试**：指数退避 + 抖动，次数用完就放弃。
 - **token 过期自动换发**：网关 `Set-Cookie` 下来的新 `_m_h5_tk` 会用于重新签名。
-- **凭证永不落盘**：只从环境变量读，不进 `.data/state.json`，界面上只显示「有没有配」
-  和诊断文字，日志里一律脱敏。
+- **凭证隔离**：只从环境变量或 `.secrets/`（权限 600、已 gitignore）读，
+  不进 `.data/state.json`，界面上只显示「有没有配」和诊断文字，日志里一律脱敏。
+- **后台巡检不碰真实账号**：`runTick` 根本拿不到读通道，同步只能由你手动点
+  「从平台同步」触发。切到真实读通道不会让它在后台偷偷发请求。
 
 #### 映射层认不出来就跳过
 
@@ -171,7 +203,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议，143 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析，155 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
@@ -212,7 +244,8 @@ src/
     │   ├── mock-reader.ts  模拟读通道
     │   └── live/           真实读通道
     │       ├── mtop.ts         签名、错误码分类、重试决策
-    │       ├── credentials.ts  凭证读取与脱敏
+    │       ├── login-state.ts  登录态解析与存储（cookie + 请求头）
+    │       ├── credentials.ts  凭证检查与脱敏
     │       ├── paths.ts        候选路径取值
     │       ├── mapping.ts      返回结构 → 领域模型
     │       └── reader.ts       LiveXianyuReader
@@ -226,7 +259,8 @@ src/
     └── store.ts            JSON 文件存储
 tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
 scripts/screenshots.mjs     重新生成 README 截图
-scripts/xianyu-probe.mjs    真实通道排查工具
+scripts/xianyu-probe.mjs    接口名探测与排查
+scripts/xianyu-login.mjs    导入 / 验证 / 清除登录态
 docs/plans/                 执行计划
 ```
 

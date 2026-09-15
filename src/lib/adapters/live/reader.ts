@@ -1,6 +1,7 @@
 import type { XianyuReader } from "@/lib/adapters/types";
 import type { AppState, PlatformSnapshot } from "@/lib/domain/types";
-import { credentialStatus, readCookie } from "./credentials";
+import { credentialStatus } from "./credentials";
+import { type LoginState, loadLoginState } from "./login-state";
 import { mapListings, mapOrders } from "./mapping";
 import {
   GOOFISH_APP_KEY,
@@ -59,6 +60,8 @@ interface CallOptions {
   /** 注入用，方便测试退避而不用真的等 */
   sleep?: (ms: number) => Promise<void>;
   fetchImpl?: typeof fetch;
+  /** 注入用，省得测试里去读文件 */
+  loginState?: LoginState;
 }
 
 const defaultSleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,11 +81,15 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
     fetchImpl = fetch,
   } = options;
 
-  let cookie = readCookie();
-  if (!cookie) {
-    throw new LiveChannelError("没有配置 XIANYU_COOKIE，真实读通道不可用。", "not_configured");
+  const loginState = options.loginState ?? (await loadLoginState());
+  if (!loginState?.cookie) {
+    throw new LiveChannelError(
+      "还没有导入登录态。用扩展导出后跑 npm run xianyu:login 导入。",
+      "not_configured",
+    );
   }
 
+  let cookie = loginState.cookie;
   const data = JSON.stringify(payload);
   let last: MtopOutcome = { kind: "other", ret: "", message: "还没发出任何请求" };
 
@@ -98,12 +105,13 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
     });
 
     const response = await fetchImpl(url, {
+      // 带上当初登录那个浏览器的请求头。cookie 和 User-Agent 对不上，
+      // 本身就是风控的典型触发条件。
       headers: {
-        cookie,
         accept: "application/json",
         referer: "https://www.goofish.com/",
-        "user-agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        ...loginState.headers,
+        cookie,
       },
       signal: AbortSignal.timeout(15_000),
     });
@@ -179,7 +187,7 @@ export class LiveXianyuReader implements XianyuReader {
   readonly isMock = false;
 
   async fetchSnapshot(state: AppState, now: number): Promise<PlatformSnapshot> {
-    const credentials = credentialStatus();
+    const credentials = await credentialStatus();
     if (!credentials.configured) {
       throw new LiveChannelError(credentials.detail, "not_configured");
     }

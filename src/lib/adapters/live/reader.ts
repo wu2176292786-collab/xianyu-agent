@@ -2,12 +2,12 @@ import type { XianyuReader } from "@/lib/adapters/types";
 import type { AppState, PlatformSnapshot } from "@/lib/domain/types";
 import { credentialStatus } from "./credentials";
 import { type LoginState, loadLoginState } from "./login-state";
-import { mapListings, mapOrders } from "./mapping";
+import { mapConversations, mapListings, mapOrders } from "./mapping";
 import {
   GOOFISH_APP_KEY,
   type MtopOutcome,
   backoffMs,
-  buildRequestUrl,
+  buildRequest,
   decideRetry,
   extractToken,
   readEnvelope,
@@ -25,19 +25,49 @@ import {
 export const VERIFIED_ENDPOINTS = {
   listings: "mtop.idle.web.xyh.item.list",
   userHead: "mtop.idle.web.user.page.head",
+  /**
+   * 会话列表。名字和版本号是从闲鱼网页版自己的打包产物里读出来的
+   * （`mtop.taobao.idlemessage.pc.session.sync`，v3.0，needLogin）。
+   *
+   * 之前一直没探到这个接口，是因为我们照着「订单列表」的思路去猜名字，
+   * 而闲鱼的私信走的是另一套 `idlemessage` 命名空间。
+   */
+  conversations: "mtop.taobao.idlemessage.pc.session.sync",
+  /** 某个会话里的历史消息，v1.0 */
+  messages: "mtop.taobao.idlemessage.pc.message.sync",
+  /** 商品详情，带 `{"itemId":"..."}` */
+  itemDetail: "mtop.taobao.idle.pc.detail",
 } as const;
 
+export interface Endpoint {
+  api: string;
+  version: string;
+}
+
 export interface EndpointConfig {
-  listings?: string;
-  conversations?: string;
-  orders?: string;
+  listings?: Endpoint;
+  conversations?: Endpoint;
+  orders?: Endpoint;
+}
+
+/** `mtop.xxx` 或者 `mtop.xxx@3.0`，后者用来覆盖版本号。 */
+function parseEndpoint(raw: string | undefined, fallbackVersion = "1.0"): Endpoint | undefined {
+  if (!raw?.trim()) return undefined;
+  const [api, version] = raw.trim().split("@");
+  return { api, version: version?.trim() || fallbackVersion };
 }
 
 export function endpointConfig(): EndpointConfig {
   return {
-    listings: process.env.XIANYU_API_LISTINGS ?? VERIFIED_ENDPOINTS.listings,
-    conversations: process.env.XIANYU_API_CONVERSATIONS,
-    orders: process.env.XIANYU_API_ORDERS,
+    listings:
+      parseEndpoint(process.env.XIANYU_API_LISTINGS) ??
+      ({ api: VERIFIED_ENDPOINTS.listings, version: "1.0" } as const),
+    conversations:
+      parseEndpoint(process.env.XIANYU_API_CONVERSATIONS, "3.0") ??
+      ({ api: VERIFIED_ENDPOINTS.conversations, version: "3.0" } as const),
+    // 卖出订单的接口名还没确认。买到的是 mtop.idle.web.trade.bought.list，
+    // 但那不是卖家要的东西，硬用会把买家订单当成自己的销售单。
+    orders: parseEndpoint(process.env.XIANYU_API_ORDERS),
   };
 }
 
@@ -95,7 +125,7 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const token = extractToken(cookie) ?? "";
-    const url = buildRequestUrl({
+    const request = buildRequest({
       api,
       version,
       appKey: GOOFISH_APP_KEY,
@@ -104,15 +134,19 @@ export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
       data,
     });
 
-    const response = await fetchImpl(url, {
+    const response = await fetchImpl(request.url, {
+      method: "POST",
       // 带上当初登录那个浏览器的请求头。cookie 和 User-Agent 对不上，
       // 本身就是风控的典型触发条件。
       headers: {
         accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://www.goofish.com",
         referer: "https://www.goofish.com/",
         ...loginState.headers,
         cookie,
       },
+      body: request.body,
       signal: AbortSignal.timeout(15_000),
     });
 
@@ -198,21 +232,36 @@ export class LiveXianyuReader implements XianyuReader {
     }
 
     const listingsOutcome = await callMtop({
-      api: endpoints.listings,
+      api: endpoints.listings.api,
+      version: endpoints.listings.version,
       payload: { pageNumber: 1, pageSize: 40 },
     });
-    if (listingsOutcome.kind !== "ok") throw explain(listingsOutcome, endpoints.listings);
+    if (listingsOutcome.kind !== "ok") throw explain(listingsOutcome, endpoints.listings.api);
 
     const listings = mapListings(listingsOutcome.data, now);
 
-    // 消息和订单接口没配就先不抓，保留本地已有的，而不是把它们清空
+    // 会话列表。sessionTypes 1,19 是网页版自己带的（单聊 + 系统会话）。
+    let conversations = state.conversations;
+    if (endpoints.conversations) {
+      const outcome = await callMtop({
+        api: endpoints.conversations.api,
+        version: endpoints.conversations.version,
+        payload: { sessionTypes: "1,19", pageSize: 30 },
+      });
+      if (outcome.kind !== "ok") throw explain(outcome, endpoints.conversations.api);
+      const mapped = mapConversations(outcome.data, now);
+      if (mapped.items.length > 0) conversations = mapped.items;
+    }
+
+    // 卖出订单的接口名还没确认，没配就保留本地的，而不是把它们清空
     let orders = state.orders;
     if (endpoints.orders) {
       const ordersOutcome = await callMtop({
-        api: endpoints.orders,
+        api: endpoints.orders.api,
+        version: endpoints.orders.version,
         payload: { pageNumber: 1, pageSize: 30 },
       });
-      if (ordersOutcome.kind !== "ok") throw explain(ordersOutcome, endpoints.orders);
+      if (ordersOutcome.kind !== "ok") throw explain(ordersOutcome, endpoints.orders.api);
       const mapped = mapOrders(ordersOutcome.data, now);
       if (mapped.items.length > 0) orders = mapped.items;
     }
@@ -220,8 +269,7 @@ export class LiveXianyuReader implements XianyuReader {
     return {
       fetchedAt: new Date(now).toISOString(),
       listings: listings.items.length > 0 ? listings.items : state.listings,
-      // 会话接口还没探到，先保留本地的，不假装同步过
-      conversations: state.conversations,
+      conversations,
       orders,
     };
   }

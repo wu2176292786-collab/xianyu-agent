@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const HOST = "https://h5api.m.goofish.com";
-const APP_KEY = "12574478";
+// 闲鱼网页版自己的 appKey，参与签名。填淘宝那个 12574478 的话签名永远算不对。
+const APP_KEY = "34839810";
 
 function loadEnvLocal() {
   try {
@@ -49,7 +50,8 @@ function sign(token, t, data) {
   return createHash("md5").update(`${token}&${t}&${APP_KEY}&${data}`).digest("hex");
 }
 
-async function call(api, { cookie = "", payload = {} } = {}) {
+/** 和浏览器一样：data 走表单体，POST 过去。 */
+async function call(api, { cookie = "", payload = {}, version = "1.0" } = {}) {
   const token = cookie.match(/_m_h5_tk=([^;_]+)_/)?.[1] ?? "";
   const t = String(Date.now());
   const data = JSON.stringify(payload);
@@ -58,19 +60,26 @@ async function call(api, { cookie = "", payload = {} } = {}) {
     appKey: APP_KEY,
     t,
     sign: sign(token, t, data),
-    v: "1.0",
+    v: version,
     type: "originaljson",
+    accountSite: "xianyu",
     dataType: "json",
+    timeout: "20000",
     api,
-    data,
+    sessionOption: "AutoLoginOnly",
+    spm_cnt: "a21ybx.home.0.0",
   });
 
-  const response = await fetch(`${HOST}/h5/${api}/1.0/?${query}`, {
+  const response = await fetch(`${HOST}/h5/${api}/${version}/?${query}`, {
+    method: "POST",
     headers: {
       accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      origin: "https://www.goofish.com",
       referer: "https://www.goofish.com/",
       ...(cookie ? { cookie } : {}),
     },
+    body: `data=${encodeURIComponent(data)}`,
     signal: AbortSignal.timeout(15_000),
   });
   return response.json();
@@ -98,10 +107,15 @@ function shape(value, prefix = "", depth = 0, out = []) {
 }
 
 const KNOWN = [
-  ["mtop.idle.web.xyh.item.list", "商品列表（已确认存在）"],
-  ["mtop.idle.web.user.page.head", "用户主页（已确认存在）"],
-  ["mtop.idle.web.user.page.nav", "用户导航（已确认存在）"],
-  ["mtop.idle.web.trade.bought.list", "买到的订单（已确认存在）"],
+  ["mtop.idle.web.xyh.item.list", "商品列表（在用）", "1.0"],
+  ["mtop.taobao.idlemessage.pc.session.sync", "会话列表（在用）", "3.0"],
+  ["mtop.taobao.idlemessage.pc.message.sync", "某个会话的消息", "1.0"],
+  ["mtop.taobao.idle.pc.detail", "商品详情", "1.0"],
+  ["mtop.taobao.idlemessage.pc.login.token", "私信令牌", "1.0"],
+  ["mtop.idle.web.user.page.head", "用户主页", "1.0"],
+  ["mtop.idle.web.user.page.nav", "用户导航", "1.0"],
+  ["mtop.idle.web.trade.bought.list", "买到的订单（不是卖出）", "1.0"],
+  ["mtop.taobao.idle.trade.user.adjust.price", "订单改价（写操作，未接入）", "1.0"],
 ];
 
 loadEnvLocal();
@@ -130,10 +144,12 @@ if (opts.call) {
   process.exit(0);
 }
 
-const targets = opts.api ? [[opts.api, "你指定的接口"]] : KNOWN;
+const targets = opts.api
+  ? [[opts.api, "你指定的接口", opts.version ?? "1.0"]]
+  : KNOWN;
 console.log("接口存在性检查（不需要登录，网关会直接告诉你路由在不在）：");
-for (const [api, note] of targets) {
-  const body = await call(api);
+for (const [api, note, version] of targets) {
+  const body = await call(api, { version });
   const ret = retOf(body);
   const exists = !ret.startsWith("FAIL_SYS_API_NOT_FOUNDED");
   console.log(`  ${exists ? "✓ 存在  " : "✗ 不存在"} ${api}  ${note ?? ""}`);
@@ -143,9 +159,10 @@ for (const [api, note] of targets) {
 
 console.log(`
 下一步：
-  1. 在浏览器里打开闲鱼的消息页和订单页，F12 → Network 筛 h5api
-  2. 找到对应请求，把 api 名字记下来，填进 .env.local：
-       XIANYU_API_CONVERSATIONS=mtop.xxx
-       XIANYU_API_ORDERS=mtop.xxx
-  3. 用 --call 看返回结构，对照 src/lib/adapters/live/mapping.ts 里的候选字段
+  1. 导入登录态：npm run xianyu:login（配合浏览器扩展，见 README）
+  2. 验证登录态是活的：npm run xianyu:login -- --verify
+  3. 卖出订单的接口名还没确认。打开闲鱼的「我卖出的」页面，F12 → Network 筛 h5api，
+     找到那个请求，填进 .env.local（可以用 @ 指定版本号）：
+       XIANYU_API_ORDERS=mtop.xxx@1.0
+  4. 用 --call 看返回结构，对照 src/lib/adapters/live/mapping.ts 里的候选字段
 `);

@@ -3,22 +3,54 @@ import { afterEach, describe, expect, it } from "vitest";
 import { inspectLoginState } from "@/lib/adapters/live/credentials";
 import { describeLoginState, parseLoginState } from "@/lib/adapters/live/login-state";
 import {
+  GOOFISH_APP_KEY,
   backoffMs,
-  buildRequestUrl,
+  buildRequest,
   classifyRet,
   decideRetry,
   extractToken,
   readEnvelope,
   signRequest,
 } from "@/lib/adapters/live/mtop";
-import { callMtop, mergeCookie } from "@/lib/adapters/live/reader";
+import { callMtop, endpointConfig, mergeCookie } from "@/lib/adapters/live/reader";
+
+describe("接口配置", () => {
+  const saved = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("会话接口默认用从网页版里读出来的那个，版本是 3.0", () => {
+    delete process.env.XIANYU_API_CONVERSATIONS;
+    expect(endpointConfig().conversations).toEqual({
+      api: "mtop.taobao.idlemessage.pc.session.sync",
+      version: "3.0",
+    });
+  });
+
+  it("可以用 @ 覆盖版本号", () => {
+    process.env.XIANYU_API_ORDERS = "mtop.some.order.list@2.0";
+    expect(endpointConfig().orders).toEqual({ api: "mtop.some.order.list", version: "2.0" });
+  });
+
+  it("不写版本号就按 1.0", () => {
+    process.env.XIANYU_API_ORDERS = "mtop.some.order.list";
+    expect(endpointConfig().orders).toEqual({ api: "mtop.some.order.list", version: "1.0" });
+  });
+
+  it("卖出订单接口没配就是没配，不拿「买到的」凑数", () => {
+    delete process.env.XIANYU_API_ORDERS;
+    expect(endpointConfig().orders).toBeUndefined();
+  });
+});
 
 describe("MTOP 签名", () => {
   it("是 md5(token&时间戳&appKey&data)", () => {
     const expected = createHash("md5")
-      .update("tok123&1700000000000&12574478&{}")
+      .update("tok123&1700000000000&34839810&{}")
       .digest("hex");
-    expect(signRequest("tok123", "1700000000000", "12574478", "{}")).toBe(expected);
+    expect(signRequest("tok123", "1700000000000", "34839810", "{}")).toBe(expected);
   });
 
   it("任一入参变了签名就变", () => {
@@ -29,22 +61,46 @@ describe("MTOP 签名", () => {
     expect(signRequest("tok", "1", "app", '{"a":1}')).not.toBe(base);
   });
 
-  it("请求地址带齐网关要的参数", () => {
-    const url = new URL(
-      buildRequestUrl({
-        api: "mtop.idle.web.xyh.item.list",
-        version: "1.0",
-        appKey: "12574478",
-        token: "tok",
-        timestamp: "1700000000000",
-        data: '{"pageNumber":1}',
-      }),
-    );
+  it("用的是闲鱼自己的 appKey，不是淘宝 h5 那个", () => {
+    // 填错 appKey 签名就永远算不对，所有需要登录的调用都会失败
+    expect(GOOFISH_APP_KEY).toBe("34839810");
+  });
+
+  it("请求地址带齐网关要的参数，data 放进表单体", () => {
+    const request = buildRequest({
+      api: "mtop.idle.web.xyh.item.list",
+      version: "1.0",
+      appKey: "34839810",
+      token: "tok",
+      timestamp: "1700000000000",
+      data: '{"pageNumber":1}',
+    });
+    const url = new URL(request.url);
+
     expect(url.pathname).toBe("/h5/mtop.idle.web.xyh.item.list/1.0/");
-    expect(url.searchParams.get("appKey")).toBe("12574478");
+    expect(url.searchParams.get("appKey")).toBe("34839810");
     expect(url.searchParams.get("t")).toBe("1700000000000");
-    expect(url.searchParams.get("data")).toBe('{"pageNumber":1}');
     expect(url.searchParams.get("sign")).toHaveLength(32);
+    expect(url.searchParams.get("accountSite")).toBe("xianyu");
+    expect(url.searchParams.get("sessionOption")).toBe("AutoLoginOnly");
+    // data 走表单体，不塞在查询串里 —— 请求体一长 URL 就顶不住
+    expect(url.searchParams.get("data")).toBeNull();
+    expect(request.body).toBe(`data=${encodeURIComponent('{"pageNumber":1}')}`);
+  });
+
+  it("版本号会体现在路径上", () => {
+    const request = buildRequest({
+      api: "mtop.taobao.idlemessage.pc.session.sync",
+      version: "3.0",
+      appKey: "34839810",
+      token: "tok",
+      timestamp: "1700000000000",
+      data: "{}",
+    });
+    expect(new URL(request.url).pathname).toBe(
+      "/h5/mtop.taobao.idlemessage.pc.session.sync/3.0/",
+    );
+    expect(new URL(request.url).searchParams.get("v")).toBe("3.0");
   });
 });
 
@@ -205,6 +261,31 @@ describe("callMtop", () => {
   it("没导入登录态时直接抛出未配置错误", async () => {
     delete process.env.XIANYU_COOKIE;
     await expect(callMtop({ api: "mtop.x" })).rejects.toThrow("还没有导入登录态");
+  });
+
+  it("按浏览器的样子发：POST + 表单体里的 data", async () => {
+    let seenInit: { method?: string; body?: string; headers: Record<string, string> } = {
+      headers: {},
+    };
+    const impl = (async (_url: string, init: typeof seenInit) => {
+      seenInit = init;
+      return {
+        headers: { get: () => null },
+        json: async () => ({ ret: ["SUCCESS::ok"], data: {} }),
+      };
+    }) as unknown as typeof fetch;
+
+    await callMtop({
+      api: "mtop.taobao.idlemessage.pc.session.sync",
+      version: "3.0",
+      payload: { sessionTypes: "1,19" },
+      fetchImpl: impl,
+      loginState: { cookie: "unb=1; _m_h5_tk=tok_1", headers: {} },
+    });
+
+    expect(seenInit.method).toBe("POST");
+    expect(seenInit.headers["content-type"]).toBe("application/x-www-form-urlencoded");
+    expect(seenInit.body).toBe(`data=${encodeURIComponent('{"sessionTypes":"1,19"}')}`);
   });
 
   it("请求会带上导出时抓到的请求头", async () => {

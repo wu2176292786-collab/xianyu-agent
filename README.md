@@ -137,9 +137,14 @@ OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
 协议细节是对着真实网关探出来的，不是猜的：
 
 ```
-GET https://h5api.m.goofish.com/h5/{api}/{version}/?appKey=12574478&t=…&sign=…&data=…
+POST https://h5api.m.goofish.com/h5/{api}/{version}/?appKey=34839810&t=…&sign=…
+     body: data=<urlencoded JSON>
 → {"api":"…","ret":["SUCCESS::接口调用成功"],"data":{…}}
 ```
+
+`appKey` 是 **34839810**，参与签名，填错了签名永远算不对。
+（这里一度写成 `12574478` —— 那是淘宝 h5 的 appKey，从示例里抄来的，
+所以任何需要登录的调用都注定失败。闲鱼自己的打包产物里根本没出现过那个值。）
 
 #### 导入登录态
 
@@ -182,10 +187,15 @@ XIANYU_USER_AGENT=你浏览器的 User-Agent   # 强烈建议一起配
 
 #### 接口名配置
 
+商品和会话都有默认值，不用配。只有**卖出订单**的接口名还没确认：
+
 ```bash
-XIANYU_API_ORDERS=mtop.xxx            # 可选，没配就保留本地订单
-XIANYU_API_CONVERSATIONS=mtop.xxx     # 可选，没配就保留本地会话
+XIANYU_API_ORDERS=mtop.xxx@1.0        # 可选，没配就保留本地订单
+XIANYU_API_LISTINGS=mtop.xxx          # 可选，覆盖默认的商品列表接口
+XIANYU_API_CONVERSATIONS=mtop.xxx@3.0 # 可选，覆盖默认的会话接口
 ```
+
+`@` 后面是版本号，不写按 `1.0`。会话接口是 `3.0`，所以这个必须支持。
 
 #### 排查工具
 
@@ -195,19 +205,29 @@ npm run xianyu:probe -- --api mtop.xxx    # 验证某个接口名存不存在（
 npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返回结构
 ```
 
-网关会区分「接口不存在」和「令牌为空」，所以**不登录就能验证接口名是否真实存在**。
-已确认存在的：
+网关会区分「接口不存在」「令牌为空」和「Session 过期」，所以**不登录就能验证接口名
+是否真实存在**。已对着真实网关确认存在的：
 
-| 接口 | 用途 |
-| --- | --- |
-| `mtop.idle.web.xyh.item.list` | 商品列表（默认使用） |
-| `mtop.idle.web.user.page.head` | 用户主页 |
-| `mtop.idle.web.user.page.nav` | 用户导航 |
-| `mtop.idle.web.trade.bought.list` | 买到的订单 |
+| 接口 | 版本 | 用途 |
+| --- | --- | --- |
+| `mtop.idle.web.xyh.item.list` | 1.0 | 商品列表（默认使用） |
+| `mtop.taobao.idlemessage.pc.session.sync` | 3.0 | **会话列表**（默认使用） |
+| `mtop.taobao.idlemessage.pc.message.sync` | 1.0 | 某个会话里的历史消息 |
+| `mtop.taobao.idle.pc.detail` | 1.0 | 商品详情 |
+| `mtop.taobao.idlemessage.pc.login.token` | 1.0 | 私信令牌（WebSocket 用） |
+| `mtop.idle.web.user.page.head` / `.nav` | 1.0 | 用户主页 / 导航 |
+| `mtop.idle.web.trade.bought.list` | 1.0 | **买到的**订单（不是卖出的） |
+| `mtop.taobao.idle.trade.user.adjust.price` | 1.0 | 订单改价（写操作，未接入） |
 
-消息和卖出订单的接口名没探到，需要你从浏览器抓包补上 —— 与其硬编码一个猜的名字让它
-在运行时莫名其妙地失败，不如明确地说「没配」。没配的部分同步时会保留本地数据，
-不会清空。
+会话接口一直没探到，是因为之前照着「订单列表」的思路猜名字，而闲鱼的私信走的是
+另一套 `idlemessage` 命名空间。
+
+**卖出订单**的接口名仍未确认。`bought.list` 是买到的，硬拿来用会把你买的东西当成
+销售单。所以没配就是没配 —— 与其硬编码一个猜的名字让它在运行时莫名其妙地失败，
+不如明确地说「没配」。没配的部分同步时会保留本地数据，不会清空。
+
+会话列表只给「最后一条消息」的摘要，所以同步进来的会话里就只有那一条 ——
+**不假装拿到了完整聊天记录**。完整对话要另外调 `message.sync`，还没接。
 
 #### 安全行为
 
@@ -321,6 +341,16 @@ npm run dev                                  # 1. 应用跑起来
 - 后台定时去拉同行商详（那是爬站）
 - 让模型看图猜「想要」或流量（数字只认页面上抽出来的字段）
 - 根据同行数据自动改你的标题、主图、价格
+
+#### 协议细节的来源
+
+接口名、appKey、签名算法和请求形态，一部分是自己对着网关探出来的，一部分来自
+[cv-cat/XianYuApis](https://github.com/cv-cat/XianYuApis) —— 那个项目里带了闲鱼网页版
+的打包产物，`session.sync` / `message.sync` 这些名字和 `34839810` 这个 appKey 就是
+从里面读出来的。每一条都用 `npm run xianyu:probe` 对着真实网关验过存在性，没有照抄。
+
+**私信的实时收发走的不是 HTTP**，而是钉钉那套 WebSocket（`wss://wss-goofish.dingtalk.com`），
+消息体是 base64 + Protobuf。这一版只用 `session.sync` 读会话列表快照；实时收发还没接。
 
 ### 接真实写通道还要做什么
 

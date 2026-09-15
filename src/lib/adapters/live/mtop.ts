@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 
 /**
- * 闲鱼网页版走的是淘系的 MTOP 网关，协议细节都是从真实网关探出来的：
+ * 闲鱼网页版走的是淘系的 MTOP 网关：
  *
- *   GET https://h5api.m.goofish.com/h5/{api}/{version}/?jsv=2.7.2&appKey=...&t=...&sign=...&data=...
+ *   POST https://h5api.m.goofish.com/h5/{api}/{version}/?appKey=...&t=...&sign=...
+ *   body: data=<urlencoded JSON>
  *   → {"api":"...","v":"1.0","ret":["SUCCESS::接口调用成功"],"data":{...}}
  *
  * 下面这几个错误码是实测拿到的，不是猜的：
@@ -12,7 +13,16 @@ import { createHash } from "node:crypto";
  *   FAIL_SYS_SESSION_EXPIRED
  */
 export const MTOP_HOST = "https://h5api.m.goofish.com";
-export const GOOFISH_APP_KEY = "12574478";
+
+/**
+ * 闲鱼网页版的 appKey。
+ *
+ * 这个值参与签名（见 {@link signRequest}），填错了签名就永远算不对 ——
+ * 之前这里写的是 `12574478`（淘宝 h5 的 appKey，从示例里抄来的），
+ * 所以任何需要登录的调用都注定失败。`34839810` 是从闲鱼网页版自己的
+ * 打包产物里读出来的，那份 bundle 里根本没有出现过 12574478。
+ */
+export const GOOFISH_APP_KEY = "34839810";
 
 export interface MtopEnvelope {
   api?: string;
@@ -96,7 +106,24 @@ export function signRequest(
   return createHash("md5").update(`${token}&${timestamp}&${appKey}&${data}`).digest("hex");
 }
 
-export function buildRequestUrl(options: {
+export interface MtopRequest {
+  url: string;
+  /** 表单体，形如 `data=%7B%7D` */
+  body: string;
+}
+
+/**
+ * 按网页版的样子拼一次请求。
+ *
+ * 两个细节是照着真实客户端来的，不是随手写的：
+ *
+ * 1. **`data` 放在表单体里，用 POST**。以前我们把 data 塞在查询串里走 GET —— 网关
+ *    对部分接口也认，但发布、改价这类请求体一长，URL 就顶不住了，而且和浏览器
+ *    的行为不一致本身就是风控信号。
+ * 2. **`accountSite` / `sessionOption` / `spm_cnt` 这几个参数照带**。浏览器每次
+ *    都发，少了不一定报错，但没必要让自己看起来与众不同。
+ */
+export function buildRequest(options: {
   api: string;
   version: string;
   appKey: string;
@@ -104,7 +131,7 @@ export function buildRequestUrl(options: {
   timestamp: string;
   data: string;
   host?: string;
-}): string {
+}): MtopRequest {
   const { api, version, appKey, token, timestamp, data } = options;
   const query = new URLSearchParams({
     jsv: "2.7.2",
@@ -113,11 +140,18 @@ export function buildRequestUrl(options: {
     sign: signRequest(token, timestamp, appKey, data),
     v: version,
     type: "originaljson",
+    accountSite: "xianyu",
     dataType: "json",
+    timeout: "20000",
     api,
-    data,
+    sessionOption: "AutoLoginOnly",
+    spm_cnt: "a21ybx.home.0.0",
   });
-  return `${options.host ?? MTOP_HOST}/h5/${api}/${version}/?${query.toString()}`;
+
+  return {
+    url: `${options.host ?? MTOP_HOST}/h5/${api}/${version}/?${query.toString()}`,
+    body: `data=${encodeURIComponent(data)}`,
+  };
 }
 
 /** 从 Set-Cookie 或者完整 cookie 串里抠出 `_m_h5_tk` 的 token 部分。 */

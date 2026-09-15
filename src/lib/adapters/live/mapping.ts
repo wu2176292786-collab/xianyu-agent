@@ -1,4 +1,4 @@
-import type { Listing, Order, OrderStatus } from "@/lib/domain/types";
+import type { Conversation, Listing, Order, OrderStatus } from "@/lib/domain/types";
 import { getList, pickNumber, pickString } from "./paths";
 
 /**
@@ -104,6 +104,103 @@ export function mapListings(payload: unknown, now: number): MapResult<Listing> {
       wants: pickNumber(record, ITEM_WANTS) ?? 0,
       inquiries7d: 0,
       tags: [],
+    });
+  }
+
+  return { items, skipped };
+}
+
+/* ── 会话（mtop.taobao.idlemessage.pc.session.sync）────────────────────── */
+
+const SESSION_LIST_PATHS = [
+  "data.sessions",
+  "data.sessionList",
+  "data.list",
+  "data.result",
+  "data.data",
+  "data.modules.sessions",
+];
+
+const SESSION_ID = ["sessionId", "cid", "id", "sessionInfo.sessionId"];
+const SESSION_BUYER = [
+  "peerUserNick",
+  "targetNick",
+  "userNick",
+  "nick",
+  "sessionInfo.peerUserNick",
+  "user.nick",
+];
+const SESSION_ITEM_ID = ["itemId", "bizId", "sessionInfo.itemId", "item.itemId"];
+const SESSION_LAST_TEXT = [
+  "lastMessageContent",
+  "lastMsgContent",
+  "content",
+  "summary",
+  "lastMessage.content",
+  "lastMessage.text",
+];
+const SESSION_LAST_AT = [
+  "lastMessageTime",
+  "lastMsgTime",
+  "modifyTime",
+  "gmtModified",
+  "lastMessage.time",
+];
+const SESSION_UNREAD = ["unreadCount", "unread", "redPointCount"];
+const SESSION_LAST_SENDER = ["lastMessageSenderId", "lastSenderId", "senderUserId"];
+
+/**
+ * 会话列表 → 领域模型。
+ *
+ * 只能还原出「最后一条消息」这一条记录 —— 会话列表接口本来就只给摘要。
+ * 完整的对话要另外调 `mtop.taobao.idlemessage.pc.message.sync`，所以这里
+ * **不假装自己拿到了完整聊天记录**：`messages` 里就放这一条，作者按未读数判断。
+ *
+ * 未读 > 0 说明最后说话的是买家，会话标成待回复；否则算等买家回。
+ * 这个判断不完美，但比瞎猜作者要老实 —— 拿不到发送者 id 时它至少不会
+ * 把自己发的话当成买家问题，让 Agent 去回复自己。
+ */
+export function mapConversations(payload: unknown, now: number): MapResult<Conversation> {
+  let records: unknown[] = [];
+  for (const path of SESSION_LIST_PATHS) {
+    records = getList(payload, path);
+    if (records.length > 0) break;
+  }
+
+  const items: Conversation[] = [];
+  let skipped = 0;
+
+  for (const record of records) {
+    const id = pickString(record, SESSION_ID);
+    const text = pickString(record, SESSION_LAST_TEXT);
+    // 会话 id 和最后一条消息缺任何一个都没法用：没有 id 无从对齐，
+    // 没有文本就没有可判断意图的内容
+    if (!id || !text) {
+      skipped += 1;
+      continue;
+    }
+
+    const unread = pickNumber(record, SESSION_UNREAD) ?? 0;
+    const senderId = pickString(record, SESSION_LAST_SENDER);
+    const buyerIsLast = unread > 0 || (senderId !== undefined && senderId !== "");
+    const at = pickNumber(record, SESSION_LAST_AT);
+
+    items.push({
+      id,
+      buyerName: pickString(record, SESSION_BUYER) ?? "买家",
+      buyerEmoji: "🐟",
+      listingId: pickString(record, SESSION_ITEM_ID) ?? "",
+      status: unread > 0 ? "needs_reply" : "awaiting_buyer",
+      // 意图由 runTick 按文本重新判定，这里不猜
+      intent: "other",
+      messages: [
+        {
+          id: `${id}-last`,
+          author: buyerIsLast ? "buyer" : "seller",
+          text,
+          createdAt: new Date(at && at > 1_000_000_000_000 ? at : now).toISOString(),
+        },
+      ],
     });
   }
 

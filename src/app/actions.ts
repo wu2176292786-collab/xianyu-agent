@@ -592,7 +592,18 @@ export interface LiveChannelStatus {
  * 只返回「有没有配」和诊断文字，绝不把 cookie 本身传到浏览器。
  */
 export async function liveChannelStatus(): Promise<LiveChannelStatus> {
-  return { credentials: await credentialStatus(), endpoints: endpointConfig() };
+  const endpoints = endpointConfig();
+  const label = (endpoint?: { api: string; version: string }) =>
+    endpoint ? `${endpoint.api}（v${endpoint.version}）` : undefined;
+
+  return {
+    credentials: await credentialStatus(),
+    endpoints: {
+      listings: label(endpoints.listings),
+      conversations: label(endpoints.conversations),
+      orders: label(endpoints.orders),
+    },
+  };
 }
 
 /* ── 选品研究 ──────────────────────────────────────────────────────────── */

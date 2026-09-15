@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapListings, mapOrders } from "@/lib/adapters/live/mapping";
+import { mapConversations, mapListings, mapOrders } from "@/lib/adapters/live/mapping";
 import { describeShape, getList, getPath, pick, pickNumber } from "@/lib/adapters/live/paths";
 
 const NOW = Date.parse("2026-01-10T12:00:00.000Z");
@@ -76,6 +76,74 @@ describe("商品映射", () => {
       views7d: 128,
       wants: 7,
     });
+  });
+
+  it("会话列表能还原出买家、商品和最后一条消息", () => {
+    const payload = {
+      data: {
+        sessions: [
+          {
+            sessionId: "S1001",
+            peerUserNick: "会走路的鱼",
+            itemId: "812345",
+            lastMessageContent: "3900 能出吗？",
+            lastMessageTime: NOW - 60_000,
+            unreadCount: 2,
+          },
+        ],
+      },
+    };
+
+    const { items, skipped } = mapConversations(payload, NOW);
+    expect(skipped).toBe(0);
+    expect(items[0]).toMatchObject({
+      id: "S1001",
+      buyerName: "会走路的鱼",
+      listingId: "812345",
+      status: "needs_reply",
+    });
+    expect(items[0].messages).toHaveLength(1);
+    expect(items[0].messages[0]).toMatchObject({
+      author: "buyer",
+      text: "3900 能出吗？",
+    });
+  });
+
+  it("未读为 0 的会话算等买家回，不会催着 Agent 去回复", () => {
+    const payload = {
+      data: {
+        sessionList: [
+          { cid: "S2", nick: "小满", content: "好的，谢谢", unreadCount: 0 },
+        ],
+      },
+    };
+
+    const { items } = mapConversations(payload, NOW);
+    expect(items[0].status).toBe("awaiting_buyer");
+    expect(items[0].messages[0].author).toBe("seller");
+  });
+
+  it("意图不在映射层瞎猜，交给规则引擎按文本判定", () => {
+    const payload = {
+      data: { sessions: [{ sessionId: "S3", content: "退货", unreadCount: 1 }] },
+    };
+    expect(mapConversations(payload, NOW).items[0].intent).toBe("other");
+  });
+
+  it("缺会话 id 或最后一条消息的记录直接跳过", () => {
+    const payload = {
+      data: {
+        sessions: [
+          { sessionId: "S1", content: "有的" },
+          { sessionId: "S2" },
+          { content: "没有 id" },
+        ],
+      },
+    };
+
+    const { items, skipped } = mapConversations(payload, NOW);
+    expect(items).toHaveLength(1);
+    expect(skipped).toBe(2);
   });
 
   it("同步进来的商品底价一律是未确认的", () => {

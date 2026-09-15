@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { mapConversations, mapListings, mapOrders } from "@/lib/adapters/live/mapping";
+import {
+  mapConversations,
+  mapListings,
+  mapOrders,
+  readListingMetrics,
+} from "@/lib/adapters/live/mapping";
 import { describeShape, getList, getPath, pick, pickNumber } from "@/lib/adapters/live/paths";
 
 const NOW = Date.parse("2026-01-10T12:00:00.000Z");
@@ -94,6 +99,28 @@ describe("商品映射", () => {
 
     const wrapped = mapListings({ data: { cardList: [card] } }, NOW);
     expect(wrapped.items).toHaveLength(1);
+  });
+
+  /**
+   * 详情接口的真实字段名，照抄实测结果。
+   * 列表接口不给热度数据，这些只能从详情补。
+   */
+  it("从商品详情里读出浏览 / 想要 / 库存", () => {
+    const detail = {
+      itemDO: { browseCnt: 687, wantCnt: 5, quantity: 1, collectCnt: 2, soldPrice: "200" },
+    };
+    expect(readListingMetrics(detail)).toEqual({ views7d: 687, wants: 5, stock: 1 });
+
+    // 信封没剥掉也认
+    expect(readListingMetrics({ data: detail }).views7d).toBe(687);
+  });
+
+  it("详情里没有这些字段时一律留空，不补 0", () => {
+    expect(readListingMetrics({ itemDO: { soldPrice: "200" } })).toEqual({
+      views7d: undefined,
+      wants: undefined,
+      stock: undefined,
+    });
   });
 
   it("平台没给热度数据时标出来，不把占位的 0 当成真数据", () => {

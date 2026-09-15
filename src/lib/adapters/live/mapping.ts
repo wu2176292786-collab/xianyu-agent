@@ -266,6 +266,37 @@ export function mapConversations(
   return { items, skipped, ignored };
 }
 
+/* ── 商品详情（mtop.taobao.idle.pc.detail）──────────────────────────────── */
+
+// 裸路径优先：reader 传进来的是剥掉信封之后的 data 本身
+const DETAIL_VIEWS = ["itemDO.browseCnt", "data.itemDO.browseCnt", "browseCnt"];
+const DETAIL_WANTS = ["itemDO.wantCnt", "data.itemDO.wantCnt", "wantCnt"];
+const DETAIL_STOCK = ["itemDO.quantity", "data.itemDO.quantity", "quantity"];
+
+export interface ListingMetrics {
+  views7d?: number;
+  wants?: number;
+  stock?: number;
+}
+
+/**
+ * 从商品详情里取热度数据。
+ *
+ * 商品列表接口不给浏览 / 想要 / 库存，详情接口给（实测 `itemDO.browseCnt`、
+ * `itemDO.wantCnt`、`itemDO.quantity`）。一件商品一次请求，所以只值得对
+ * **在售** 商品做 —— 已售出的商品，这些数字对决策没有意义。
+ *
+ * 注意 `browseCnt` 是**累计**浏览，不是近 7 天。我们把它填进 `views7d` 是因为
+ * 平台没有 7 天口径的数字，这一点在阈值上要自己心里有数。
+ */
+export function readListingMetrics(payload: unknown): ListingMetrics {
+  return {
+    views7d: pickNumber(payload, DETAIL_VIEWS),
+    wants: pickNumber(payload, DETAIL_WANTS),
+    stock: pickNumber(payload, DETAIL_STOCK),
+  };
+}
+
 const ORDER_ID = ["orderId", "bizOrderId", "id", "mainOrderId"];
 const ORDER_ITEM_ID = ["itemId", "auctionId", "item.itemId"];
 const ORDER_BUYER = ["buyerNick", "buyer.nick", "nick", "userNick"];

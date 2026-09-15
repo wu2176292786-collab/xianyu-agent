@@ -2,7 +2,12 @@ import type { XianyuReader } from "@/lib/adapters/types";
 import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
 import { credentialStatus } from "./credentials";
 import { type LoginState, loadLoginState } from "./login-state";
-import { mapConversations, mapListings, mapOrders } from "./mapping";
+import {
+  mapConversations,
+  mapListings,
+  mapOrders,
+  readListingMetrics,
+} from "./mapping";
 import {
   GOOFISH_APP_KEY,
   type MtopOutcome,
@@ -48,6 +53,8 @@ export interface EndpointConfig {
   listings?: Endpoint;
   conversations?: Endpoint;
   orders?: Endpoint;
+  /** 商品详情，用来补列表接口不给的热度数据 */
+  itemDetail?: Endpoint;
 }
 
 /** `mtop.xxx` 或者 `mtop.xxx@3.0`，后者用来覆盖版本号。 */
@@ -68,6 +75,9 @@ export function endpointConfig(): EndpointConfig {
     // 卖出订单的接口名还没确认。买到的是 mtop.idle.web.trade.bought.list，
     // 但那不是卖家要的东西，硬用会把买家订单当成自己的销售单。
     orders: parseEndpoint(process.env.XIANYU_API_ORDERS),
+    itemDetail:
+      parseEndpoint(process.env.XIANYU_API_ITEM_DETAIL) ??
+      ({ api: VERIFIED_ENDPOINTS.itemDetail, version: "1.0" } as const),
   };
 }
 
@@ -99,7 +109,8 @@ interface CallOptions {
   loginState?: LoginState | null;
 }
 
-const defaultSleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * 发一次 MTOP 请求，带退避重试。
@@ -273,6 +284,56 @@ async function fetchAllListings(
 }
 
 /**
+ * 一次同步最多补几件商品的热度数据。
+ *
+ * 一件一次请求，所以有上限 —— 同步一次打几十个请求，本身就是风控信号。
+ */
+const MAX_ENRICHED = 20;
+
+/**
+ * 给在售商品补上浏览 / 想要 / 库存。
+ *
+ * 商品列表接口不给这些数，详情接口给。只对**在售**商品做：已售出的商品这些
+ * 数字对决策没有意义，而每件都要一次请求。
+ *
+ * 补不到的就保持 `metricsUnknown`，让降价规则继续绕开它 ——
+ * 宁可不降价，也不拿一个没拿到的数字去降。
+ */
+async function enrichOnSaleMetrics(
+  listings: Listing[],
+  endpoint: Endpoint,
+  sleep: (ms: number) => Promise<void>,
+): Promise<number> {
+  const targets = listings.filter((l) => l.status === "on_sale").slice(0, MAX_ENRICHED);
+  let enriched = 0;
+
+  for (const listing of targets) {
+    const outcome = await callMtop({
+      api: endpoint.api,
+      version: endpoint.version,
+      payload: { itemId: listing.id },
+    });
+    // 单件失败不该让整次同步失败 —— 少一件的热度数据，不如把其余的先拿回来。
+    // 但风控必须立刻停手，继续打请求只会让账号更危险。
+    if (outcome.kind === "risk_control") throw explain(outcome, endpoint.api);
+    if (outcome.kind !== "ok") continue;
+
+    const metrics = readListingMetrics(outcome.data);
+    if (metrics.views7d === undefined && metrics.wants === undefined) continue;
+
+    if (metrics.views7d !== undefined) listing.views7d = metrics.views7d;
+    if (metrics.wants !== undefined) listing.wants = metrics.wants;
+    if (metrics.stock !== undefined) listing.stock = metrics.stock;
+    listing.metricsUnknown = false;
+    enriched += 1;
+
+    await sleep(400);
+  }
+
+  return enriched;
+}
+
+/**
  * 真实读通道。
  *
  * 只读 —— 它没有任何写操作。写操作走 `XianyuAdapter`，而且必须穿过
@@ -304,6 +365,11 @@ export class LiveXianyuReader implements XianyuReader {
     }
 
     const listings = await fetchAllListings(endpoints.listings, userId, now);
+
+    // 列表接口不给热度数据，只能对在售商品逐件补
+    if (endpoints.itemDetail) {
+      await enrichOnSaleMetrics(listings.items, endpoints.itemDetail, defaultSleep);
+    }
 
     // 会话列表只认 fetchNum 这一个必填参数；系统会话在映射层按 sessionType 过滤
     let conversations = state.conversations;

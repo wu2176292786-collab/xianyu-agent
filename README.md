@@ -229,6 +229,21 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 会话列表只给「最后一条消息」的摘要，所以同步进来的会话里就只有那一条 ——
 **不假装拿到了完整聊天记录**。完整对话要另外调 `message.sync`，还没接。
 
+#### 实测记下来的坑
+
+| 坑 | 真相 |
+| --- | --- |
+| 商品列表必填参数 | `userId`（= cookie 里的 `unb`）+ `pageNumber` + `pageSize`，少一个是 `FAIL_BIZ_BAD_REQUEST` |
+| 每页上限 | `pageSize` 填 40 被拒（最大可查看商品数超限），20 可以 |
+| 会话列表必填参数 | 只认 `fetchNum`，`sessionTypes` 给不给都一样 |
+| `ownerInfo` 不一定是我 | 有的会话里自己在 `userInfo` 那边，对方只能靠「userId ≠ unb」认 |
+| 混着系统会话 | `sessionType` 23 / 25 / 62 是官方通知、物流、活动，只收 `1`（单聊） |
+| 列表不给热度数据 | 浏览 / 想要 / 库存只有详情接口有，只对**在售**商品逐件补，且有上限 |
+| `itemStatus: 1` | 是「卖掉了」，用详情接口的 `itemStatusStr` 核对过 |
+
+热度数据有一点要自己心里有数：详情接口给的 `browseCnt` 是**累计**浏览，不是近 7 天。
+平台没有 7 天口径的数字，所以滞销降价的阈值要按累计量重新设。
+
 #### 安全行为
 
 - **风控绝不重试**：`RGV587_ERROR`、`FAIL_SYS_ILLEGAL_ACCESS` 这类返回一出现就立刻停手，

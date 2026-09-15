@@ -3,7 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { setWritesPaused, syncFromPlatform, updateChannel } from "@/app/actions";
+import {
+  type LiveChannelStatus,
+  setWritesPaused,
+  syncFromPlatform,
+  updateChannel,
+} from "@/app/actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,10 +44,13 @@ const READ_CHANNELS: Array<{ value: ReadChannel; hint: string }> = [
 export function ChannelCard({
   channel,
   safety,
+  live,
   lastSyncAt,
 }: {
   channel: ChannelConfig;
   safety: SafetyState;
+  /** 真实通道的配置情况，只含「有没有配」，不含凭证本身 */
+  live: LiveChannelStatus;
   lastSyncAt?: string;
 }) {
   const [pending, startTransition] = useTransition();
@@ -163,6 +171,26 @@ export function ChannelCard({
                 上次同步：{lastSyncAt ? relativeTime(lastSyncAt) : "还没同步过"}
               </span>
             </div>
+
+            {channel.read === "live" ? (
+              <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                <p className={live.credentials.configured ? "" : "text-amber-700"}>
+                  凭证：{live.credentials.detail}
+                </p>
+                <p className="text-muted-foreground">
+                  商品接口：{live.endpoints.listings ?? "未配置"}
+                </p>
+                <p className="text-muted-foreground">
+                  订单接口：{live.endpoints.orders ?? "未配置（同步时会保留本地订单）"}
+                </p>
+                <p className="text-muted-foreground">
+                  消息接口：{live.endpoints.conversations ?? "未配置（同步时会保留本地会话）"}
+                </p>
+                <p className="text-muted-foreground">
+                  用 <code className="font-mono">npm run xianyu:probe</code> 验证接口名和登录态。
+                </p>
+              </div>
+            ) : null}
           </div>
         </div>
 

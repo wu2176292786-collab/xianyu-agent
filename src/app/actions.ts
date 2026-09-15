@@ -3,6 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { readerFor, writeChannel } from "@/lib/adapters";
 import {
+  type CredentialStatus,
+  credentialStatus,
+} from "@/lib/adapters/live/credentials";
+import { LiveChannelError, endpointConfig } from "@/lib/adapters/live/reader";
+import {
   WRITE_MODE_LABEL,
   pauseWrites,
   resumeWrites,
@@ -497,9 +502,22 @@ export async function syncFromPlatform(): Promise<ActionResponse> {
     snapshot = await reader.fetchSnapshot(state, now);
   } catch (error) {
     const message = error instanceof Error ? error.message : "读通道调用失败";
-    await mutateState((s) => logActivity(s, "system", `同步失败：${message}`, now));
+    // 读的时候撞上风控，说明这个账号已经被盯上了，写操作必须立刻停手
+    const riskControl = error instanceof LiveChannelError && error.kind === "risk_control";
+
+    await mutateState((s) => {
+      logActivity(s, "system", `同步失败：${message}`, now);
+      if (riskControl && !s.safety.paused) {
+        pauseWrites(s, `同步时撞上平台风控：${message}`, "risk_control", now);
+        logActivity(s, "system", "已自动急停，所有写操作停止。", now);
+      }
+    });
+
     revalidateAll();
-    return { ok: false, message };
+    return {
+      ok: false,
+      message: riskControl ? `${message}（已自动急停）` : message,
+    };
   }
 
   const response = await mutateState((s) => {
@@ -544,6 +562,19 @@ export async function confirmFloorPrice(
 
   revalidateAll();
   return response;
+}
+
+export interface LiveChannelStatus {
+  credentials: CredentialStatus;
+  endpoints: { listings?: string; conversations?: string; orders?: string };
+}
+
+/**
+ * 真实通道的配置情况。
+ * 只返回「有没有配」和诊断文字，绝不把 cookie 本身传到浏览器。
+ */
+export async function liveChannelStatus(): Promise<LiveChannelStatus> {
+  return { credentials: credentialStatus(), endpoints: endpointConfig() };
 }
 
 export async function resetDemoData(): Promise<ActionResponse> {

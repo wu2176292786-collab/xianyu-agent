@@ -1,3 +1,4 @@
+import { liveChannelStatus } from "@/app/actions";
 import { AgentTickButton } from "@/components/agent-tick-button";
 import { AutoTickCard } from "@/components/auto-tick-card";
 import { ChannelCard } from "@/components/channel-card";
@@ -48,6 +49,7 @@ export default async function AutomationsPage() {
       <ChannelCard
         channel={state.channel}
         safety={state.safety}
+        live={await liveChannelStatus()}
         lastSyncAt={state.lastSyncAt}
       />
 

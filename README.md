@@ -99,16 +99,79 @@ OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
 从平台同步进来的新商品只有挂牌价，底价是按九折估的，会标成「底价待确认」。
 在你亲自确认之前，自动降价规则会绕开它 —— 拿一个猜出来的底价去降价，等于没有底价。
 
-### 接真实通道要做什么
+### 真实读通道（v1.3，进行中）
 
-实现 `src/lib/adapters/types.ts` 里的两个接口：`XianyuReader`（读）和 `XianyuAdapter`（写）。
-规则引擎、安全阀和界面都不需要改动 —— 写通道会自动套上 `GuardedAdapter` 的护栏。
+**写通道仍然没有真实实现**，选「真实写入」会被明确拒绝。这一版做的是**只读**接入。
+
+闲鱼网页版走的是淘系的 MTOP 网关。传输层、签名、登录态、重试和风控识别都已经实现，
+协议细节是对着真实网关探出来的，不是猜的：
+
+```
+GET https://h5api.m.goofish.com/h5/{api}/{version}/?appKey=12574478&t=…&sign=…&data=…
+→ {"api":"…","ret":["SUCCESS::接口调用成功"],"data":{…}}
+```
+
+#### 配置
+
+```bash
+# .env.local（已被 .gitignore 忽略，绝不要提交或贴给别人）
+XIANYU_COOKIE=整条 cookie 串
+XIANYU_API_ORDERS=mtop.xxx            # 可选，没配就保留本地订单
+XIANYU_API_CONVERSATIONS=mtop.xxx     # 可选，没配就保留本地会话
+```
+
+拿 cookie 的方法：浏览器登录 `www.goofish.com` → F12 → Network → 随便点一个
+`h5api.m.goofish.com` 的请求 → 复制请求头里的整条 `Cookie`。
+**这串东西等同于你的账号。**
+
+#### 排查工具
+
+```bash
+npm run xianyu:probe                      # 检查凭证 + 验证已知接口是否存在
+npm run xianyu:probe -- --api mtop.xxx    # 验证某个接口名存不存在（不需要登录）
+npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返回结构
+```
+
+网关会区分「接口不存在」和「令牌为空」，所以**不登录就能验证接口名是否真实存在**。
+已确认存在的：
+
+| 接口 | 用途 |
+| --- | --- |
+| `mtop.idle.web.xyh.item.list` | 商品列表（默认使用） |
+| `mtop.idle.web.user.page.head` | 用户主页 |
+| `mtop.idle.web.user.page.nav` | 用户导航 |
+| `mtop.idle.web.trade.bought.list` | 买到的订单 |
+
+消息和卖出订单的接口名没探到，需要你从浏览器抓包补上 —— 与其硬编码一个猜的名字让它
+在运行时莫名其妙地失败，不如明确地说「没配」。没配的部分同步时会保留本地数据，
+不会清空。
+
+#### 安全行为
+
+- **风控绝不重试**：`RGV587_ERROR`、`FAIL_SYS_ILLEGAL_ACCESS` 这类返回一出现就立刻停手，
+  并且**自动按下急停**。撞上滑块还继续请求，只会让账号更危险。
+- **登录失效绝不重试**：重试也没用，直接告诉你要重新扫码。
+- **限流退避重试**：指数退避 + 抖动，次数用完就放弃。
+- **token 过期自动换发**：网关 `Set-Cookie` 下来的新 `_m_h5_tk` 会用于重新签名。
+- **凭证永不落盘**：只从环境变量读，不进 `.data/state.json`，界面上只显示「有没有配」
+  和诊断文字，日志里一律脱敏。
+
+#### 映射层认不出来就跳过
+
+真实接口的返回结构没有公开文档，只能靠抓包，而且会变。所以每个字段都给一组候选路径，
+**认不出来的记录直接跳过并计数**，绝不硬塞一个猜出来的值 ——
+一个编出来的价格比没有数据危险得多。
+
+### 接真实写通道还要做什么
+
+实现 `src/lib/adapters/types.ts` 里的 `XianyuAdapter`。规则引擎、安全阀和界面都不需要
+改动 —— 写通道会自动套上 `GuardedAdapter` 的护栏。
 
 ## 开发
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎、回复起草、调度、失败处理、安全阀、同步合并，96 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议，143 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
@@ -146,7 +209,13 @@ src/
     ├── adapters/
     │   ├── guard.ts        安全阀：急停 / 演练 / 限流 / 风控暂停
     │   ├── mock.ts         模拟写通道
-    │   └── mock-reader.ts  模拟读通道
+    │   ├── mock-reader.ts  模拟读通道
+    │   └── live/           真实读通道
+    │       ├── mtop.ts         签名、错误码分类、重试决策
+    │       ├── credentials.ts  凭证读取与脱敏
+    │       ├── paths.ts        候选路径取值
+    │       ├── mapping.ts      返回结构 → 领域模型
+    │       └── reader.ts       LiveXianyuReader
     ├── agent/
     │   ├── engine.ts       规则引擎：状态 + 时间 → 建议
     │   ├── reply.ts        意图识别与回复起草
@@ -157,6 +226,7 @@ src/
     └── store.ts            JSON 文件存储
 tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
 scripts/screenshots.mjs     重新生成 README 截图
+scripts/xianyu-probe.mjs    真实通道排查工具
 docs/plans/                 执行计划
 ```
 

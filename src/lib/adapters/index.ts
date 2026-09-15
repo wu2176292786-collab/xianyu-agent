@@ -1,6 +1,8 @@
 import type { AppState } from "@/lib/domain/types";
 import { GuardedAdapter } from "./guard";
 import { mockAdapter } from "./mock";
+import { credentialStatus } from "./live/credentials";
+import { liveXianyuReader } from "./live/reader";
 import { liveReader, mockReader } from "./mock-reader";
 import type { XianyuReader } from "./types";
 
@@ -13,5 +15,7 @@ import type { XianyuReader } from "./types";
 export const writeChannel = new GuardedAdapter(mockAdapter);
 
 export function readerFor(state: AppState): XianyuReader {
-  return state.channel.read === "live" ? liveReader : mockReader;
+  if (state.channel.read !== "live") return mockReader;
+  // 没配凭证时给出明确的「未接入」错误，而不是让请求在网关那边莫名其妙地失败
+  return credentialStatus().configured ? liveXianyuReader : liveReader;
 }

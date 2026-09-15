@@ -1,5 +1,5 @@
 import { type LoginState, loadLoginState } from "./login-state";
-import { extractToken } from "./mtop";
+import { describeTokenExpiry, extractToken } from "./mtop";
 
 /**
  * 真实通道的凭证检查。
@@ -51,8 +51,7 @@ export function inspectLoginState(state: LoginState | null): CredentialStatus {
     };
   }
 
-  const notes = [`登录态字段 ${present.join("、")} 齐全`];
-  if (!hasToken) notes.push("缺 _m_h5_tk，首次请求会自动换取");
+  const notes = [`登录态字段 ${present.join("、")} 齐全`, describeTokenExpiry(state.cookie)];
   if (!hasUserAgent) {
     notes.push("没有 User-Agent —— 建议用扩展一并导出，请求头和 cookie 不一致容易触发风控");
   }

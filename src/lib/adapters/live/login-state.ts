@@ -18,7 +18,13 @@ export interface LoginState {
   capturedAt?: string;
 }
 
-/** 会跟着请求一起带上的头。cookie 单独处理，其余一律丢掉。 */
+/**
+ * 会跟着请求一起带上的头。cookie 单独处理，其余一律丢掉。
+ *
+ * 故意不收 `accept-encoding`：浏览器会报 `gzip, deflate, br, zstd`，
+ * 但 Node 的 fetch 不一定解得开 zstd，照抄过来反而会把响应搞坏。
+ * 压缩协商交给 Node 自己去做。
+ */
 const HEADER_ALLOWLIST = [
   "user-agent",
   "accept",
@@ -28,6 +34,9 @@ const HEADER_ALLOWLIST = [
   "sec-ch-ua",
   "sec-ch-ua-mobile",
   "sec-ch-ua-platform",
+  "sec-fetch-site",
+  "sec-fetch-mode",
+  "sec-fetch-dest",
 ];
 
 const CREDENTIALS_FILE = path.join(process.cwd(), ".secrets", "xianyu-login-state.json");
@@ -83,12 +92,24 @@ function headersFromUnknown(source: Record<string, unknown>): Record<string, str
   for (const key of ["userAgent", "ua", "user_agent"]) {
     if (typeof source[key] === "string") raw["user-agent"] = source[key];
   }
+
+  // 也可能埋在 env 里。扩展实际导出的是 env.navigator.userAgent，
+  // 比我原先预想的深一层 —— 两层都找一遍。
   const env = source.env ?? source.environment ?? source.browser;
   if (env && typeof env === "object") {
     const record = env as Record<string, unknown>;
-    for (const key of ["userAgent", "ua"]) {
-      if (typeof record[key] === "string" && !raw["user-agent"]) {
-        raw["user-agent"] = record[key];
+    const candidates: Array<Record<string, unknown>> = [record];
+    for (const key of ["navigator", "nav"]) {
+      const nested = record[key];
+      if (nested && typeof nested === "object") {
+        candidates.push(nested as Record<string, unknown>);
+      }
+    }
+    for (const candidate of candidates) {
+      for (const key of ["userAgent", "ua"]) {
+        if (typeof candidate[key] === "string" && !raw["user-agent"]) {
+          raw["user-agent"] = candidate[key];
+        }
       }
     }
   }

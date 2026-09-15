@@ -126,6 +126,25 @@ export function extractToken(cookie: string): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * `_m_h5_tk` 的格式是 `token_过期毫秒时间戳`，实测有效期大约 90 分钟。
+ * 过期了也不致命 —— 网关会返回令牌错误，我们换发一次就能继续。
+ */
+export function tokenExpiry(cookie: string): number | null {
+  const match = cookie.match(/_m_h5_tk=[^;_]+_(\d+)/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function describeTokenExpiry(cookie: string, now = Date.now()): string {
+  const expiry = tokenExpiry(cookie);
+  if (expiry === null) return "没有 _m_h5_tk，首次请求会自动换取";
+  const minutes = Math.round((expiry - now) / 60_000);
+  if (minutes <= 0) return "_m_h5_tk 已过期，首次请求会自动换取";
+  return `_m_h5_tk 约 ${minutes} 分钟后过期`;
+}
+
 /** 退避重试的等待时间，带一点抖动，别让请求节奏看起来像机器。 */
 export function backoffMs(attempt: number, base = 800, jitter = () => Math.random()): number {
   const exponential = base * 2 ** attempt;

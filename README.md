@@ -129,6 +129,9 @@ npm run xianyu:login -- --clear     # 删掉
 ```
 
 导入的内容存在 `.secrets/xianyu-login-state.json`，权限 `600`，目录已在 `.gitignore` 里。
+解析器对着扩展 v1.1 的真实导出结构验证过：cookie 数组里的 `domain` / `httpOnly` 这些属性
+不会混进 cookie 串，`storage` 里的令牌不会被当成 cookie，`env.navigator.userAgent` 也能捞出来。
+`Accept-Encoding` 会被丢掉 —— 浏览器报的 `zstd` Node 的 fetch 不一定解得开，照抄反而会把响应搞坏。
 
 **为什么推荐这个扩展，而不是只手抄 cookie：** 它会把 cookie 和当时的**请求头**
 （User-Agent / Accept-Language / Sec-CH-UA 等）一起导出。cookie 是在某个具体浏览器里
@@ -203,7 +206,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析，155 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析，158 个用例
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑

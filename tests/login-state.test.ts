@@ -83,6 +83,81 @@ describe("登录态解析", () => {
     expect(state.headers["user-agent"]).toBe("环境里的 UA");
   });
 
+  // 下面这个形状对照的是扩展 v1.1 的真实导出结构（字段名真实，值全部是假的）
+  it("认得出扩展 v1.1 的真实导出结构", () => {
+    const exported = {
+      capturedAt: "2026-09-15T03:50:50.040Z",
+      pageUrl: "https://www.goofish.com/personal",
+      page: { pageUrl: "https://www.goofish.com/personal", visibilityState: "visible" },
+      env: {
+        navigator: {
+          // 真实导出里 UA 埋在 env.navigator 下面，比一层更深
+          userAgent: "Mozilla/5.0 (Macintosh) Chrome/152.0.0.0",
+          platform: "MacIntel",
+          language: "zh-CN",
+        },
+        screen: { width: 1512, height: 982 },
+        intl: { timeZone: "Asia/Shanghai", locale: "zh-CN" },
+      },
+      // storage 里也有令牌，但 MTOP 请求用不上，必须被忽略掉
+      storage: { local: { tfstk__: "假的", syfhs: "假的" }, session: {} },
+      headers: {
+        "sec-ch-ua-platform": '"macOS"',
+        "User-Agent": "Mozilla/5.0 (Macintosh) Chrome/152.0.0.0",
+        "sec-ch-ua": '"Chromium";v="152"',
+        "sec-ch-ua-mobile": "?0",
+        Accept: "*/*",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        Referer: "https://www.goofish.com/personal",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+      },
+      cookies: [
+        { name: "cookie2", value: "fake", domain: ".goofish.com", httpOnly: true },
+        { name: "_tb_token_", value: "fake", domain: ".goofish.com" },
+        { name: "unb", value: "000", domain: ".goofish.com" },
+        { name: "sgcookie", value: "fake", domain: ".goofish.com", httpOnly: true },
+        { name: "_m_h5_tk", value: "abc123_1789449730814", domain: ".goofish.com" },
+        { name: "_m_h5_tk_enc", value: "fake", domain: ".goofish.com" },
+      ],
+    };
+
+    const state = parseLoginState(exported)!;
+
+    expect(state.cookie).toContain("cookie2=fake");
+    expect(state.cookie).toContain("unb=000");
+    expect(state.cookie).toContain("_m_h5_tk=abc123_1789449730814");
+    // cookie 数组里的 domain / httpOnly 这些属性不能混进 cookie 串
+    expect(state.cookie).not.toContain("goofish.com");
+    expect(state.cookie).not.toContain("httpOnly");
+
+    expect(state.headers["user-agent"]).toBe("Mozilla/5.0 (Macintosh) Chrome/152.0.0.0");
+    expect(state.headers["sec-fetch-site"]).toBe("same-origin");
+    expect(state.headers["sec-ch-ua"]).toBe('"Chromium";v="152"');
+    // zstd Node 不一定解得开，照抄过来会把响应搞坏
+    expect(state.headers["accept-encoding"]).toBeUndefined();
+    expect(state.capturedAt).toBe("2026-09-15T03:50:50.040Z");
+  });
+
+  it("UA 埋在 env.navigator 里也能捞出来", () => {
+    const state = parseLoginState({
+      cookie: "unb=1",
+      env: { navigator: { userAgent: "深一层的 UA" } },
+    })!;
+    expect(state.headers["user-agent"]).toBe("深一层的 UA");
+  });
+
+  it("storage 里的令牌不会被当成 cookie", () => {
+    const state = parseLoginState({
+      cookies: [{ name: "unb", value: "1" }],
+      storage: { local: { tfstk__: "不该出现" } },
+    })!;
+    expect(state.cookie).toBe("unb=1");
+    expect(state.cookie).not.toContain("tfstk__");
+  });
+
   it("认不出来就返回 null，不返回半残的对象", () => {
     expect(parseLoginState("")).toBeNull();
     expect(parseLoginState("这不是 cookie 也不是 JSON")).toBeNull();

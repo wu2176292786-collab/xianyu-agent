@@ -22,6 +22,7 @@ import path from "node:path";
 const FILE = path.join(process.cwd(), ".secrets", "xianyu-login-state.json");
 const HOST = "https://h5api.m.goofish.com";
 const APP_KEY = "12574478";
+// 故意不收 accept-encoding：浏览器会报 zstd，Node 的 fetch 不一定解得开
 const HEADER_ALLOWLIST = [
   "user-agent",
   "accept",
@@ -31,6 +32,9 @@ const HEADER_ALLOWLIST = [
   "sec-ch-ua",
   "sec-ch-ua-mobile",
   "sec-ch-ua-platform",
+  "sec-fetch-site",
+  "sec-fetch-mode",
+  "sec-fetch-dest",
 ];
 const SESSION_KEYS = ["unb", "cookie2", "_tb_token_", "sgcookie"];
 
@@ -80,9 +84,14 @@ function headersFromUnknown(source) {
   for (const key of ["userAgent", "ua", "user_agent"]) {
     if (typeof source[key] === "string") raw["user-agent"] = source[key];
   }
+  // 扩展实际导出的是 env.navigator.userAgent，比预想的深一层
   const env = source.env ?? source.environment ?? source.browser;
-  if (env && typeof env === "object" && !raw["user-agent"]) {
-    if (typeof env.userAgent === "string") raw["user-agent"] = env.userAgent;
+  if (env && typeof env === "object") {
+    for (const candidate of [env, env.navigator, env.nav]) {
+      if (candidate && typeof candidate === "object" && !raw["user-agent"]) {
+        if (typeof candidate.userAgent === "string") raw["user-agent"] = candidate.userAgent;
+      }
+    }
   }
 
   const headers = {};
@@ -129,6 +138,14 @@ function parseLoginState(input) {
   };
 }
 
+/** _m_h5_tk 的格式是 token_过期毫秒时间戳，实测有效期约 90 分钟。 */
+function describeToken(cookie) {
+  const match = cookie.match(/_m_h5_tk=[^;_]+_(\d+)/);
+  if (!match) return "没有（首次请求会自动换取）";
+  const minutes = Math.round((Number(match[1]) - Date.now()) / 60000);
+  return minutes > 0 ? `有，约 ${minutes} 分钟后过期` : "已过期（首次请求会自动换取）";
+}
+
 function describe(state) {
   if (!state) return "未配置";
   const names = state.cookie
@@ -143,7 +160,7 @@ function describe(state) {
   return [
     `  cookie 字段：${names.length} 个`,
     `  登录态字段：${session.length > 0 ? session.join("、") : "没有 —— 可能只导出了游客状态"}`,
-    `  签名 token：${/_m_h5_tk=/.test(state.cookie) ? "有" : "没有（首次请求会自动换取）"}`,
+    `  签名 token：${describeToken(state.cookie)}`,
     `  请求头：${headerNames.length > 0 ? headerNames.join(", ") : "没有 —— 建议用扩展一并导出"}`,
     `  User-Agent：${state.headers["user-agent"] ? "有" : "没有 —— 和 cookie 不一致容易触发风控"}`,
     `  导出时间：${state.capturedAt ?? "未知"}`,

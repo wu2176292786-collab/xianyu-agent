@@ -104,7 +104,7 @@ await page.goto(BASE, { waitUntil: "networkidle" });
 const dash = await text();
 check("总览 renders KPI cards", /近 7 天曝光/.test(dash) && /待发货订单/.test(dash));
 check("总览 renders chart", /近 14 天流量与成交/.test(dash) && /每日成交额/.test(dash));
-check("sidebar has 6 nav items", (await page.locator("aside nav a").count()) === 6);
+check("sidebar has 7 nav items", (await page.locator("aside nav a").count()) === 7);
 
 // ---------- 2. run the agent ----------
 await clickUntil(
@@ -240,24 +240,43 @@ if (shipCount > 0) {
 // ---------- 6.5 执行失败与重试 ----------
 // 模拟通道几乎不会失败，这里直接往状态里塞一条失败动作，验证失败标签页和重试。
 const DATA_FILE = path.join(process.cwd(), ".data", "state.json");
-const stored = JSON.parse(await readFile(DATA_FILE, "utf8"));
-const staleListing = stored.state.listings.find(
-  (l) => l.status === "on_sale" && l.stock > 0,
-);
-stored.state.actions.unshift({
-  id: "ACT-e2e-failed",
-  ruleId: "R-refresh",
-  ruleKind: "refresh_listing",
-  title: `擦亮「${staleListing.title}」`,
-  reason: "e2e 注入的失败动作",
-  risk: "low",
-  status: "failed",
-  createdAt: new Date().toISOString(),
-  payload: { type: "refresh_listing", listingId: staleListing.id },
-  failureReason: "平台返回了 503",
-  attempts: 1,
-});
-await writeFile(DATA_FILE, JSON.stringify(stored, null, 2), "utf8");
+
+/**
+ * 应用自己也在写这个文件，直接写一次可能被它的写入覆盖掉。
+ * 写完回读确认，没写进去就再来一次。
+ */
+async function injectFailedAction(attempts = 4) {
+  for (let i = 0; i < attempts; i += 1) {
+    const stored = JSON.parse(await readFile(DATA_FILE, "utf8"));
+    const staleListing = stored.state.listings.find(
+      (l) => l.status === "on_sale" && l.stock > 0,
+    );
+    // 清掉此前可能残留的失败动作，让「有 1 条动作执行失败」成为确定的断言
+    stored.state.actions = stored.state.actions.filter((a) => a.status !== "failed");
+    stored.state.actions.unshift({
+      id: "ACT-e2e-failed",
+      ruleId: "R-refresh",
+      ruleKind: "refresh_listing",
+      title: `擦亮「${staleListing.title}」`,
+      reason: "e2e 注入的失败动作",
+      risk: "low",
+      status: "failed",
+      createdAt: new Date().toISOString(),
+      payload: { type: "refresh_listing", listingId: staleListing.id },
+      failureReason: "平台返回了 503",
+      attempts: 1,
+    });
+    await writeFile(DATA_FILE, JSON.stringify(stored, null, 2), "utf8");
+
+    await page.waitForTimeout(500);
+    const after = JSON.parse(await readFile(DATA_FILE, "utf8"));
+    const failed = after.state.actions.filter((a) => a.status === "failed");
+    if (failed.length === 1 && failed[0].id === "ACT-e2e-failed") return true;
+  }
+  return false;
+}
+
+check("注入失败动作成功落盘", await injectFailedAction());
 
 await page.goto(BASE, { waitUntil: "networkidle" });
 const dashWithFailure = await text();
@@ -366,6 +385,117 @@ await clickUntil(
 await page.goto(`${BASE}/listings`, { waitUntil: "networkidle" });
 await page.locator("tbody tr").first().getByRole("button", { name: "擦亮" }).click();
 await checkToast("切回本地模拟后写操作恢复", /已擦亮/);
+
+// ---------- 7.6 选品研究：同行「想要」观察 ----------
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+const researchText = await text();
+check("研究台渲染出来", /选品研究/.test(researchText) && /观察结论/.test(researchText));
+check(
+  "结论里的价格来自观察点",
+  /可比同行的中位价是 ¥1,699\.00/.test(researchText),
+);
+check("结论挂着可以点回去的证据", (await page.locator('a[href*="goofish.com/item"]').count()) > 0);
+check("回访清单按上次观察时间列出", /回访清单/.test(researchText));
+check(
+  "缺失的字段如实显示，没有假装抽到",
+  /可比但没抽到价格|没抽到/.test(researchText),
+);
+
+/** 打开导入弹窗，粘贴一份快照，返回这次导入的提示文案。 */
+async function importSnapshot(snapshot) {
+  // 先等上一条提示自己消失，否则会把上一步的结果当成这一次的
+  await page
+    .locator("[data-sonner-toast]")
+    .last()
+    .waitFor({ state: "detached", timeout: 8000 })
+    .catch(() => {});
+
+  await clickUntil(
+    page.getByRole("button", { name: "导入页面快照" }),
+    page.locator("#snapshot"),
+  );
+  await page.locator("#snapshot").fill(JSON.stringify(snapshot));
+  await page.locator('[role="dialog"]').getByRole("button", { name: "导入" }).click();
+
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const toasts = await page.locator("[data-sonner-toast]").allInnerTexts();
+    if (toasts.length > 0) return toasts.at(-1).replace(/\n/g, " ");
+    await page.waitForTimeout(150);
+  }
+  return "(没有看到提示)";
+}
+
+const capturedAt = new Date().toISOString();
+const firstImport = await importSnapshot({
+  capturedAt,
+  pageUrl: "https://www.goofish.com/item?id=812345001",
+  pageType: "detail",
+  api: {
+    data: {
+      itemDO: {
+        itemId: "812345001",
+        title: "Nintendo Switch OLED 白色 主机 带塞尔达卡带 包邮",
+        wantCnt: 97,
+        soldPrice: 1699,
+      },
+    },
+  },
+});
+check("导入商详快照会追加一条观察", /记录 1 条观察/.test(firstImport), firstImport);
+
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+const afterImport = await text();
+check("时间线用上了新观察", afterImport.includes("97"));
+check("算出了相对上一次观察的增量", /\+4\b/.test(afterImport));
+
+// 同一件商品短时间内再导一次 —— 刷新不该变成一次「波动」
+const dedupeImport = await importSnapshot({
+  capturedAt: new Date(Date.now() + 60_000).toISOString(),
+  pageUrl: "https://www.goofish.com/item?id=812345001",
+  pageType: "detail",
+  visibleText: "97人想要 · 包邮",
+});
+check("窗口内的重复观察被合并", /短时重复已合并/.test(dedupeImport), dedupeImport);
+
+// 抽不到「想要」时如实说抽不到，绝不写成 0
+const missingImport = await importSnapshot({
+  capturedAt,
+  pageUrl: "https://www.goofish.com/item?id=900777",
+  pageType: "detail",
+  visibleText: "Switch OLED 白色 成色九成新 无拆修",
+});
+check(
+  "抽不到「想要」时如实报出来",
+  /没抽到「想要」/.test(missingImport) && /新增 1 件同行商品/.test(missingImport),
+  missingImport,
+);
+
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+const newRivalRow = page.locator("tbody tr").filter({ hasText: "900777" }).first();
+check("没抽到的字段在表里标成缺失", (await newRivalRow.innerText()).includes("没抽到"));
+
+// 展开时间线，确认每条观察都带证据和抽取层级
+const firstRow = page.locator("tbody tr").filter({ hasText: "812345001" }).first();
+await clickUntil(
+  firstRow.getByRole("button", { name: "时间线" }),
+  page.locator("text=页面接口").first(),
+);
+const timeline = await text();
+check("时间线标出每个数是哪一层抽的", /页面接口|内嵌 JSON|可见文字/.test(timeline));
+check("时间线区分商详与搜索", /商详/.test(timeline));
+
+// 人工改对齐结论：改过之后不该再被关键词判定覆盖
+const uncertainRow = page.locator("tbody tr").filter({ hasText: "812345005" }).first();
+await uncertainRow.getByRole("button", { name: "不同款" }).click();
+await checkToast("可以人工改对齐结论", /已标记为「不同款」/);
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+check(
+  "人工标过的对齐结论标出来源",
+  (await page.locator("tbody tr").filter({ hasText: "812345005" }).first().innerText()).includes(
+    "人工",
+  ),
+);
 
 // ---------- 8. mobile ----------
 // 等提示条自己消失，否则窄屏下它会盖住顶部的菜单按钮

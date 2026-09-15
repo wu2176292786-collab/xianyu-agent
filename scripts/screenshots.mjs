@@ -6,7 +6,7 @@ const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
 await mkdir("docs/screenshots", { recursive: true });
 
 const browser = await chromium.launch({
-  executablePath: "/usr/bin/google-chrome-stable",
+  executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome-stable",
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });
 const page = await browser.newPage({
@@ -38,6 +38,10 @@ await page.screenshot({ path: "docs/screenshots/inbox.png" });
 await page.goto(`${BASE}/automations`, { waitUntil: "networkidle" });
 await page.waitForTimeout(1200);
 await page.screenshot({ path: "docs/screenshots/automations.png", fullPage: true });
+
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+await page.waitForTimeout(1200);
+await page.screenshot({ path: "docs/screenshots/research.png", fullPage: true });
 
 await browser.close();
 console.log("done");

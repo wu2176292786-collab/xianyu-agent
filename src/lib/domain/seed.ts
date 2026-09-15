@@ -7,6 +7,10 @@ import type {
   DailyMetric,
   Listing,
   Order,
+  ResearchState,
+  ResearchTask,
+  RivalListing,
+  RivalObservation,
 } from "./types";
 
 const HOUR = 60 * 60 * 1000;
@@ -504,6 +508,173 @@ function buildActivity(now: number): ActivityEntry[] {
   ];
 }
 
+/**
+ * 示例的选品研究：盯 Switch OLED 的同行。
+ *
+ * 观察点刻意做得不完美 —— 有的只观察过一次（看不出涨跌）、有的抽不到价格、
+ * 有的规格对不齐。真实采集就是这样，界面必须能如实显示这些缺口。
+ */
+function buildResearch(now: number): ResearchState {
+  const task: ResearchTask = {
+    id: "RT001",
+    name: "Switch OLED 同款盯价",
+    keyword: "switch oled 白色",
+    mustInclude: ["OLED"],
+    mustExclude: ["续航版", "破解", "国行港版混发"],
+    linkedListingId: "L005",
+    revisitHours: 48,
+    status: "active",
+    createdAt: iso(now, -6 * DAY),
+  };
+
+  const detail = (
+    id: string,
+    hoursAgo: number,
+    itemId: string,
+    fields: {
+      wants?: number;
+      wantsFrom?: RivalObservation["wantsFrom"];
+      priceCents?: number;
+      delivery: RivalObservation["delivery"];
+      excerpt?: string;
+    },
+  ): RivalObservation => {
+    const missing: string[] = [];
+    if (fields.wants === undefined) missing.push("wants");
+    if (fields.priceCents === undefined) missing.push("price");
+    if (fields.delivery === "unknown") missing.push("delivery");
+    return {
+      id,
+      at: iso(now, -hoursAgo * HOUR),
+      source: "detail",
+      wants: fields.wants,
+      wantsFrom: fields.wantsFrom,
+      priceCents: fields.priceCents,
+      priceFrom: fields.priceCents === undefined ? undefined : "api",
+      delivery: fields.delivery,
+      pageUrl: `https://www.goofish.com/item?id=${itemId}`,
+      excerpt: fields.excerpt,
+      missing,
+    };
+  };
+
+  const rivals: RivalListing[] = [
+    {
+      id: "RV001",
+      taskId: task.id,
+      itemId: "812345001",
+      title: "Nintendo Switch OLED 白色 主机 带塞尔达卡带 包邮",
+      sellerName: "游戏仓的老王",
+      url: "https://www.goofish.com/item?id=812345001",
+      addedAt: iso(now, -6 * DAY),
+      alignment: "comparable",
+      alignmentBy: "auto",
+      observations: [
+        detail("OB001", 54, "812345001", {
+          wants: 82,
+          wantsFrom: "api",
+          priceCents: 169900,
+          delivery: "free_shipping",
+        }),
+        detail("OB002", 6, "812345001", {
+          wants: 93,
+          wantsFrom: "api",
+          priceCents: 169900,
+          delivery: "free_shipping",
+        }),
+      ],
+    },
+    {
+      id: "RV002",
+      taskId: task.id,
+      itemId: "812345002",
+      title: "switch OLED 白色 9成新 原盒 全套配件",
+      sellerName: "阿柴",
+      url: "https://www.goofish.com/item?id=812345002",
+      addedAt: iso(now, -5 * DAY),
+      alignment: "comparable",
+      alignmentBy: "auto",
+      observations: [
+        detail("OB003", 68, "812345002", {
+          wants: 41,
+          wantsFrom: "dom",
+          priceCents: 175000,
+          delivery: "free_shipping",
+          excerpt: "41人想要 · 包邮",
+        }),
+        detail("OB004", 20, "812345002", {
+          wants: 44,
+          wantsFrom: "dom",
+          priceCents: 175000,
+          delivery: "free_shipping",
+          excerpt: "44人想要 · 包邮",
+        }),
+      ],
+    },
+    {
+      id: "RV003",
+      taskId: task.id,
+      itemId: "812345003",
+      title: "Switch OLED 白 单主机 无卡带 自提",
+      url: "https://www.goofish.com/item?id=812345003",
+      addedAt: iso(now, -4 * DAY),
+      alignment: "comparable",
+      alignmentBy: "auto",
+      observations: [
+        // 只观察过一次 —— 看不出涨跌，会进回访清单
+        detail("OB005", 62, "812345003", {
+          wants: 26,
+          wantsFrom: "hydration",
+          priceCents: 158000,
+          delivery: "pickup",
+        }),
+      ],
+    },
+    {
+      id: "RV004",
+      taskId: task.id,
+      itemId: "812345004",
+      title: "Switch 续航版 二手 送收纳包",
+      url: "https://www.goofish.com/item?id=812345004",
+      addedAt: iso(now, -3 * DAY),
+      // 命中「必须不含」，不进价格带
+      alignment: "different",
+      alignmentBy: "auto",
+      observations: [
+        detail("OB006", 30, "812345004", {
+          wants: 12,
+          wantsFrom: "dom",
+          priceCents: 128000,
+          delivery: "free_shipping",
+          excerpt: "12人想要 · 包邮",
+        }),
+      ],
+    },
+    {
+      id: "RV005",
+      taskId: task.id,
+      itemId: "812345005",
+      title: "任天堂游戏机 白色 九成新 送游戏",
+      url: "https://www.goofish.com/item?id=812345005",
+      addedAt: iso(now, -2 * DAY),
+      // 标题看不出是不是 OLED，拿不准就存疑
+      alignment: "uncertain",
+      alignmentBy: "auto",
+      observations: [
+        // 价格没抽到，如实留空，不写成 0
+        detail("OB007", 26, "812345005", {
+          wants: 7,
+          wantsFrom: "dom",
+          delivery: "unknown",
+          excerpt: "7人想要",
+        }),
+      ],
+    },
+  ];
+
+  return { tasks: [task], rivals };
+}
+
 export function createSeedState(now = Date.now()): AppState {
   const rand = mulberry32(20240614);
   return {
@@ -531,6 +702,7 @@ export function createSeedState(now = Date.now()): AppState {
     conversations: buildConversations(now),
     orders: buildOrders(now),
     rules: buildRules(),
+    research: buildResearch(now),
     actions: [],
     activity: buildActivity(now),
     metrics: buildMetrics(now, rand),

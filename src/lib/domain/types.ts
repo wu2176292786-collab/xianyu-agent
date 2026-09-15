@@ -231,6 +231,120 @@ export interface SafetyState {
   consecutiveFailures: number;
 }
 
+/**
+ * ─── 选品研究：同行「想要」观察 ────────────────────────────────────────────
+ *
+ * 闲鱼没有给卖家看别人流量的入口，能拿到的公开代理指标是商品主页上的「想要」。
+ * 单次数字没意义，有意义的是同一件商品多次回访之间的差值。
+ *
+ * 同行商品和本店商品彻底分表：`Listing` 上有底价、库存、擦亮时间，那是
+ * 「我能操作的货」；同行只有「我能看到的数」。混在一起，规则引擎会去擦亮别人的商品。
+ */
+
+/** 这个数是从哪一层抽出来的。越靠前越稳。 */
+export type ExtractionLayer =
+  /** 你打开页面时，页面自己已经拉回来的响应 —— 不新开请求，只读已经发生的 */
+  | "api"
+  /** 页面里内嵌的初始 JSON */
+  | "hydration"
+  /** 当前页面上可见的文字，如「86人想要」 */
+  | "dom";
+
+/** 观察是在哪种页面上做的。搜索卡片和商详不能混算。 */
+export type ObservationSource = "detail" | "search";
+
+/** 交付方式只收页面上能看见的，看不出来就是 unknown，不猜。 */
+export type DeliveryTerm = "free_shipping" | "buyer_pays" | "local" | "pickup" | "unknown";
+
+export const DELIVERY_LABEL: Record<DeliveryTerm, string> = {
+  free_shipping: "包邮",
+  buyer_pays: "买家付运费",
+  local: "同城",
+  pickup: "自提",
+  unknown: "未标明",
+};
+
+/**
+ * 一次观察。
+ *
+ * `wants` 和 `priceCents` 都是可选的 —— 读不到就是读不到。
+ * `0` 和「没读到」是两回事：把没读到记成 0，下一次读到 86 就会显示「涨了 86」。
+ */
+export interface RivalObservation {
+  id: string;
+  /** 采集时间，来自快照里的 capturedAt */
+  at: string;
+  source: ObservationSource;
+  /** 「想要」数量，抽不到就留空 */
+  wants?: number;
+  /** 这个数是哪一层给的，用来判断可信度 */
+  wantsFrom?: ExtractionLayer;
+  priceCents?: number;
+  priceFrom?: ExtractionLayer;
+  delivery: DeliveryTerm;
+  /** 证据：当时那一页的地址，可以点回去对 */
+  pageUrl: string;
+  /** DOM 层命中的原文片段，方便人工核对 */
+  excerpt?: string;
+  /** 这次没抽到的字段，如实记录，不假装同步很完美 */
+  missing: string[];
+}
+
+/**
+ * 规格对齐判定。不靠模型看图，靠标题关键词 + 可见标签。
+ *
+ * 拿不准就是 `uncertain`，而且只有 `comparable` 会进价格带 ——
+ * 拿日版当国行比，比不比更糟。
+ */
+export type Alignment = "comparable" | "uncertain" | "different";
+
+export const ALIGNMENT_LABEL: Record<Alignment, string> = {
+  comparable: "可比",
+  uncertain: "存疑",
+  different: "不同款",
+};
+
+/** 一件同行商品。以平台 itemId 为主键 —— 标题和价格都会改，itemId 不会。 */
+export interface RivalListing {
+  id: string;
+  taskId: string;
+  /** 平台 itemId，稳定主键 */
+  itemId: string;
+  title: string;
+  sellerName?: string;
+  /** 商详回链 */
+  url: string;
+  addedAt: string;
+  alignment: Alignment;
+  /** 对齐判定是自动算的还是你亲自改的。人工的不会被自动判定覆盖。 */
+  alignmentBy: "auto" | "human";
+  /** 只追加，不覆盖 —— 这一版的全部价值就是历史差值 */
+  observations: RivalObservation[];
+}
+
+export interface ResearchTask {
+  id: string;
+  name: string;
+  keyword: string;
+  /**
+   * 统一交付规格，做成可测的关键词而不是一段说明：
+   * 命中 `mustExclude` 判为不同款，命中全部 `mustInclude` 判为可比，其余存疑。
+   */
+  mustInclude: string[];
+  mustExclude: string[];
+  /** 对标本店哪件货，用来并排看价格带 */
+  linkedListingId?: string;
+  /** 超过多少小时没观察就进回访清单 */
+  revisitHours: number;
+  status: "active" | "archived";
+  createdAt: string;
+}
+
+export interface ResearchState {
+  tasks: ResearchTask[];
+  rivals: RivalListing[];
+}
+
 /** 一次平台同步拉回来的快照。 */
 export interface PlatformSnapshot {
   fetchedAt: string;
@@ -247,6 +361,8 @@ export interface AppState {
   conversations: Conversation[];
   orders: Order[];
   rules: AutomationRule[];
+  /** 选品研究：同行商品与观察时间线，和本店 listings 完全分开 */
+  research: ResearchState;
   actions: AgentAction[];
   activity: ActivityEntry[];
   metrics: DailyMetric[];

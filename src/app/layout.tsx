@@ -8,7 +8,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { WRITE_MODE_LABEL } from "@/lib/adapters/guard";
 import { llmStatus } from "@/lib/agent/llm";
 import { awaitingSellerReply } from "@/lib/agent/reply";
-import { relativeTime } from "@/lib/format";
+import { nowMs, relativeTime } from "@/lib/format";
+import { revisitQueue } from "@/lib/research/analysis";
 import { getState } from "@/lib/store";
 import "./globals.css";
 
@@ -39,6 +40,13 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   const pendingShipment = state.orders.filter(
     (o) => o.status === "pending_shipment",
   ).length;
+  // 该回访的同行数。时间线的密度等于回访的密度，所以这个数值得放在导航上提醒。
+  const revisitDue = state.research.tasks
+    .filter((task) => task.status === "active")
+    .reduce(
+      (acc, task) => acc + revisitQueue(task, state.research.rivals, nowMs()).length,
+      0,
+    );
 
   const navItems: NavItem[] = [
     { href: "/", label: "总览", icon: "📊" },
@@ -46,6 +54,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
     { href: "/inbox", label: "消息", icon: "💬", badge: needsReply },
     { href: "/listings", label: "商品", icon: "🏷️" },
     { href: "/orders", label: "订单", icon: "📦", badge: pendingShipment },
+    { href: "/research", label: "选品研究", icon: "🔍", badge: revisitDue },
     { href: "/automations", label: "自动化", icon: "⚙️" },
   ];
 

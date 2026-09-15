@@ -22,11 +22,16 @@ import { describeMerge, mergeSnapshot } from "@/lib/agent/sync";
 import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
 import { INTENT_LABEL, draftReply } from "@/lib/agent/reply";
-import type {
-  AppState,
-  ChannelConfig,
-  ReadChannel,
-  WriteMode,
+import { alignmentFor, describeRecord, recordObservations } from "@/lib/research/record";
+import { parsePageSnapshot } from "@/lib/research/snapshot";
+import {
+  ALIGNMENT_LABEL,
+  type Alignment,
+  type AppState,
+  type ChannelConfig,
+  type ReadChannel,
+  type ResearchTask,
+  type WriteMode,
 } from "@/lib/domain/types";
 import { parseYuanToCents, yuan } from "@/lib/format";
 import { getState, logActivity, mutateState, resetState } from "@/lib/store";
@@ -37,7 +42,15 @@ export interface ActionResponse {
 }
 
 function revalidateAll() {
-  for (const path of ["/", "/listings", "/inbox", "/orders", "/automations", "/queue"]) {
+  for (const path of [
+    "/",
+    "/listings",
+    "/inbox",
+    "/orders",
+    "/automations",
+    "/queue",
+    "/research",
+  ]) {
     revalidatePath(path);
   }
 }
@@ -575,6 +588,163 @@ export interface LiveChannelStatus {
  */
 export async function liveChannelStatus(): Promise<LiveChannelStatus> {
   return { credentials: await credentialStatus(), endpoints: endpointConfig() };
+}
+
+/* ── 选品研究 ──────────────────────────────────────────────────────────── */
+
+function splitKeywords(raw: string): string[] {
+  return raw
+    .split(/[,，、\s]+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+export async function createResearchTask(input: {
+  name: string;
+  keyword: string;
+  mustInclude: string;
+  mustExclude: string;
+  linkedListingId?: string;
+  revisitHours: string;
+}): Promise<ActionResponse> {
+  const name = input.name.trim();
+  if (!name) return { ok: false, message: "给这个研究任务起个名字。" };
+
+  const hours = Number(input.revisitHours);
+  if (!Number.isFinite(hours) || hours < 1 || hours > 720) {
+    return { ok: false, message: "回访间隔请填 1~720 小时。" };
+  }
+
+  const now = Date.now();
+  const response = await mutateState((state) => {
+    const task: ResearchTask = {
+      id: `RT${now.toString(36).toUpperCase()}`,
+      name,
+      keyword: input.keyword.trim(),
+      mustInclude: splitKeywords(input.mustInclude),
+      mustExclude: splitKeywords(input.mustExclude),
+      linkedListingId: input.linkedListingId || undefined,
+      revisitHours: hours,
+      status: "active",
+      createdAt: new Date(now).toISOString(),
+    };
+    state.research.tasks.unshift(task);
+    logActivity(state, "human", `新建选品研究「${name}」。`, now);
+    return { ok: true, message: `已新建研究任务「${name}」。` };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+export async function updateResearchTask(
+  taskId: string,
+  input: {
+    mustInclude?: string;
+    mustExclude?: string;
+    linkedListingId?: string;
+    revisitHours?: string;
+  },
+): Promise<ActionResponse> {
+  if (input.revisitHours !== undefined) {
+    const hours = Number(input.revisitHours);
+    if (!Number.isFinite(hours) || hours < 1 || hours > 720) {
+      return { ok: false, message: "回访间隔请填 1~720 小时。" };
+    }
+  }
+
+  const response = await mutateState((state) => {
+    const task = state.research.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, message: "找不到这个研究任务。" };
+
+    if (input.mustInclude !== undefined) task.mustInclude = splitKeywords(input.mustInclude);
+    if (input.mustExclude !== undefined) task.mustExclude = splitKeywords(input.mustExclude);
+    if (input.linkedListingId !== undefined) {
+      task.linkedListingId = input.linkedListingId || undefined;
+    }
+    if (input.revisitHours !== undefined) task.revisitHours = Number(input.revisitHours);
+
+    // 规格改了，自动判定的对齐结论要跟着重算；人工改过的不动
+    let realigned = 0;
+    for (const rival of state.research.rivals.filter((r) => r.taskId === taskId)) {
+      if (rival.alignmentBy === "human") continue;
+      const next = alignmentFor(task, rival.title);
+      if (next !== rival.alignment) realigned += 1;
+      rival.alignment = next;
+    }
+
+    return {
+      ok: true,
+      message: realigned > 0 ? `已保存，${realigned} 件同行的对齐结论变了。` : "已保存。",
+    };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+/**
+ * 导入一份页面快照。
+ *
+ * 这是同行数据**唯一**的入口：你在正常浏览时采集，本机解析入库。
+ * 服务器不会拿你的登录态去轮询别人的商详 —— 那是爬站。
+ */
+export async function importPageSnapshot(
+  taskId: string,
+  raw: string,
+): Promise<ActionResponse> {
+  if (!raw.trim()) return { ok: false, message: "先粘贴一份页面快照。" };
+
+  const now = Date.now();
+  const parsed = parsePageSnapshot(raw, now);
+  if (parsed.items.length === 0) {
+    return { ok: false, message: parsed.warnings[0] ?? "这份快照里没认出任何商品。" };
+  }
+
+  const response = await mutateState((state) => {
+    const task = state.research.tasks.find((t) => t.id === taskId);
+    if (!task) return { ok: false, message: "找不到这个研究任务。" };
+
+    const summary = recordObservations(state, taskId, parsed, now);
+    const text = describeRecord(summary);
+    logActivity(state, "human", `选品研究「${task.name}」：${text}。`, now);
+    return {
+      ok: true,
+      message: [text, ...parsed.warnings].join("；"),
+    };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+/** 人工改对齐结论。改过之后不会再被关键词判定覆盖 —— 人看过的比关键词可靠。 */
+export async function setRivalAlignment(
+  rivalId: string,
+  alignment: Alignment,
+): Promise<ActionResponse> {
+  const response = await mutateState((state) => {
+    const rival = state.research.rivals.find((r) => r.id === rivalId);
+    if (!rival) return { ok: false, message: "找不到这件同行商品。" };
+    rival.alignment = alignment;
+    rival.alignmentBy = "human";
+    return { ok: true, message: `已标记为「${ALIGNMENT_LABEL[alignment]}」。` };
+  });
+
+  revalidateAll();
+  return response;
+}
+
+export async function removeRival(rivalId: string): Promise<ActionResponse> {
+  const response = await mutateState((state) => {
+    const index = state.research.rivals.findIndex((r) => r.id === rivalId);
+    if (index < 0) return { ok: false, message: "找不到这件同行商品。" };
+    const [removed] = state.research.rivals.splice(index, 1);
+    return { ok: true, message: `已移出研究：${removed.title.slice(0, 20)}。` };
+  });
+
+  revalidateAll();
+  return response;
 }
 
 export async function resetDemoData(): Promise<ActionResponse> {

@@ -366,6 +366,13 @@ export interface PlatformSnapshot {
   listings: Listing[];
   conversations: Conversation[];
   orders: Order[];
+  /**
+   * 通道想顺便告诉你的事，会记进动态。
+   *
+   * 比如平台自己报的分组件数（「在售 0 件 / 已售出 38 件」）—— 有这个数字，
+   * 「同步回来怎么全是已售出」就不用靠猜了。
+   */
+  notes?: string[];
 }
 
 export interface AppState {

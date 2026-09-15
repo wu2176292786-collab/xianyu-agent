@@ -542,6 +542,8 @@ export async function syncFromPlatform(): Promise<ActionResponse> {
     const summary = mergeSnapshot(s, snapshot, now);
     const text = describeMerge(summary);
     logActivity(s, "system", `已从${reader.label}同步：${text}。`, now);
+    // 通道顺带报的事，比如平台自己给的分组件数
+    for (const note of snapshot.notes ?? []) logActivity(s, "system", note, now);
     if (summary.needsFloorPrice > 0) {
       logActivity(
         s,

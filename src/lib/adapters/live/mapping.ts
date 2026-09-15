@@ -266,6 +266,44 @@ export function mapConversations(
   return { items, skipped, ignored };
 }
 
+/* ── 商品分组（xyh.item.list 带 needGroupInfo 时返回）────────────────────── */
+
+const GROUP_LIST_PATHS = ["itemGroupList", "data.itemGroupList"];
+
+export interface ItemGroup {
+  name: string;
+  itemNumber: number;
+}
+
+/**
+ * 读平台自己报的分组件数。
+ *
+ * 个人主页把商品分成「综合 / 在售 / 已售出 / 包邮」，每组带 `itemNumber`。
+ * 这个数字很值钱：同步回来全是已售出的时候，它能直接告诉你是「接口不对」
+ * 还是「确实一件在售的都没有」—— 不用再去猜接口名和参数。
+ */
+export function mapItemGroups(payload: unknown): ItemGroup[] {
+  let records: unknown[] = [];
+  for (const path of GROUP_LIST_PATHS) {
+    records = getList(payload, path);
+    if (records.length > 0) break;
+  }
+
+  const groups: ItemGroup[] = [];
+  for (const record of records) {
+    const name = pickString(record, ["groupName", "name"]);
+    const itemNumber = pickNumber(record, ["itemNumber", "count", "num"]);
+    if (!name || itemNumber === undefined) continue;
+    groups.push({ name, itemNumber });
+  }
+  return groups;
+}
+
+export function describeItemGroups(groups: ItemGroup[]): string | undefined {
+  if (groups.length === 0) return undefined;
+  return `平台分组：${groups.map((g) => `${g.name} ${g.itemNumber} 件`).join("，")}`;
+}
+
 /* ── 商品详情（mtop.taobao.idle.pc.detail）──────────────────────────────── */
 
 // 裸路径优先：reader 传进来的是剥掉信封之后的 data 本身

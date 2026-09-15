@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeItemGroups,
   mapConversations,
+  mapItemGroups,
   mapListings,
   mapOrders,
   readListingMetrics,
@@ -99,6 +101,38 @@ describe("商品映射", () => {
 
     const wrapped = mapListings({ data: { cardList: [card] } }, NOW);
     expect(wrapped.items).toHaveLength(1);
+  });
+
+  /**
+   * 分组件数是平台自己报的数字。同步回来全是已售出时，它能直接区分
+   * 「接口不对」和「确实一件在售的都没有」—— 我们为这个问题猜了
+   * 14 个接口名和 18 个参数，而答案一直在 needGroupInfo 里。
+   */
+  it("读出平台自己报的分组件数", () => {
+    const payload = {
+      itemGroupList: [
+        { groupId: 1, groupName: "综合", itemNumber: 38 },
+        { groupId: 2, groupName: "在售", itemNumber: 0 },
+        { groupId: 3, groupName: "已售出", itemNumber: 38 },
+        // 名字或件数缺一个就跳过，不猜
+        { groupId: 4, itemNumber: 5 },
+      ],
+    };
+
+    const groups = mapItemGroups(payload);
+    expect(groups).toEqual([
+      { name: "综合", itemNumber: 38 },
+      { name: "在售", itemNumber: 0 },
+      { name: "已售出", itemNumber: 38 },
+    ]);
+    expect(describeItemGroups(groups)).toBe(
+      "平台分组：综合 38 件，在售 0 件，已售出 38 件",
+    );
+  });
+
+  it("没有分组信息时不编一句话出来", () => {
+    expect(mapItemGroups({})).toEqual([]);
+    expect(describeItemGroups([])).toBeUndefined();
   });
 
   /**

@@ -3,7 +3,10 @@ import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
 import { credentialStatus } from "./credentials";
 import { type LoginState, loadLoginState } from "./login-state";
 import {
+  type ItemGroup,
+  describeItemGroups,
   mapConversations,
+  mapItemGroups,
   mapListings,
   mapOrders,
   readListingMetrics,
@@ -257,18 +260,27 @@ async function fetchAllListings(
   endpoint: Endpoint,
   userId: string,
   now: number,
-): Promise<{ items: Listing[]; skipped: number }> {
+): Promise<{ items: Listing[]; skipped: number; groups: ItemGroup[] }> {
   const items: Listing[] = [];
   let skipped = 0;
+  let groups: ItemGroup[] = [];
 
   for (let page = 1; page <= MAX_LISTING_PAGES; page += 1) {
-    // userId + pageNumber + pageSize 三个都必填，少一个就是 FAIL_BIZ_BAD_REQUEST
+    // userId + pageNumber + pageSize 三个都必填，少一个就是 FAIL_BIZ_BAD_REQUEST。
+    // needGroupInfo 只在第一页要 —— 它让平台顺便报出各分组的件数。
     const outcome = await callMtop({
       api: endpoint.api,
       version: endpoint.version,
-      payload: { userId, pageNumber: page, pageSize: LISTINGS_PAGE_SIZE },
+      payload: {
+        userId,
+        pageNumber: page,
+        pageSize: LISTINGS_PAGE_SIZE,
+        ...(page === 1 ? { needGroupInfo: true } : {}),
+      },
     });
     if (outcome.kind !== "ok") throw explain(outcome, endpoint.api);
+
+    if (page === 1) groups = mapItemGroups(outcome.data);
 
     const mapped = mapListings(outcome.data, now);
     items.push(...mapped.items);
@@ -280,7 +292,7 @@ async function fetchAllListings(
     if (mapped.items.length === 0) break;
   }
 
-  return { items, skipped };
+  return { items, skipped, groups };
 }
 
 /**
@@ -397,11 +409,18 @@ export class LiveXianyuReader implements XianyuReader {
       if (mapped.items.length > 0) orders = mapped.items;
     }
 
+    // 平台自己报的分组件数。同步回来全是已售出时，这一句就能说清是
+    // 「接口不对」还是「确实一件在售的都没有」。
+    const notes = [describeItemGroups(listings.groups)].filter(
+      (note): note is string => note !== undefined,
+    );
+
     return {
       fetchedAt: new Date(now).toISOString(),
       listings: listings.items.length > 0 ? listings.items : state.listings,
       conversations,
       orders,
+      notes,
     };
   }
 }

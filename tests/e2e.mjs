@@ -21,6 +21,30 @@ function check(name, ok, detail = "") {
   if (!ok) failures += 1;
 }
 
+/**
+ * 测试第一步就点「重置示例数据」，会把同步来的真实数据冲掉。
+ *
+ * 所以先把状态文件抄一份，跑完（哪怕是崩了）再放回去 —— 在接了真实账号的
+ * 机器上跑一次测试，不该让人重新同步一遍。
+ */
+const STATE_FILE = path.join(process.cwd(), ".data", "state.json");
+let savedState = null;
+try {
+  savedState = await readFile(STATE_FILE, "utf8");
+} catch {
+  // 还没有状态文件，说明是干净环境，跑完也不用还原
+}
+
+async function restoreState() {
+  if (savedState === null) return;
+  try {
+    await writeFile(STATE_FILE, savedState, "utf8");
+    console.log("\n（已还原测试前的数据）");
+  } catch (error) {
+    console.error("\n⚠️  还原数据失败：", error?.message ?? error);
+  }
+}
+
 function report() {
   console.log(results.join("\n"));
   console.log(`\n${results.length - failures}/${results.length} passed`);
@@ -28,9 +52,10 @@ function report() {
 
 // 中途崩了也要把已经跑过的结果打出来，否则看不到是哪一步开始坏的。
 for (const event of ["uncaughtException", "unhandledRejection"]) {
-  process.on(event, (err) => {
+  process.on(event, async (err) => {
     check("未预期的错误", false, String(err?.message ?? err).split("\n")[0]);
     report();
+    await restoreState();
     process.exit(1);
   });
 }
@@ -802,4 +827,5 @@ check("没有页面级 JS 错误", pageErrors.length === 0, pageErrors.slice(0, 
 
 report();
 await browser.close();
+await restoreState();
 process.exit(failures > 0 ? 1 : 0);

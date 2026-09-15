@@ -22,6 +22,7 @@ import { describeMerge, mergeSnapshot } from "@/lib/agent/sync";
 import { performTick } from "@/lib/agent/tick";
 import { polishReply } from "@/lib/agent/llm";
 import { INTENT_LABEL, draftReply } from "@/lib/agent/reply";
+import { clearDemoData, describeClearDemo } from "@/lib/domain/demo";
 import { newCollectorToken } from "@/lib/research/collector";
 import { alignmentFor, describeRecord, recordObservations } from "@/lib/research/record";
 import { parsePageSnapshot } from "@/lib/research/snapshot";
@@ -787,4 +788,34 @@ export async function resetDemoData(): Promise<ActionResponse> {
   await resetState();
   revalidateAll();
   return { ok: true, message: "示例数据已重置。" };
+}
+
+/**
+ * 只清示例数据，留下同步来的真实数据。
+ *
+ * 和「重置示例数据」正好相反：那个会把真实数据一起冲掉。
+ */
+export async function clearDemo(): Promise<ActionResponse> {
+  const now = Date.now();
+
+  // 顺手把店铺名换成平台上的真名。拿不到就算了，不阻塞清理。
+  let nick: string | undefined;
+  const state = await getState();
+  if (state.channel.read === "live") {
+    try {
+      nick = (await readerFor(state).fetchSnapshot(state, now)).shopName;
+    } catch {
+      // 登录态过期之类，清理照做
+    }
+  }
+
+  const response = await mutateState((s) => {
+    const summary = clearDemoData(s, nick);
+    const text = describeClearDemo(summary);
+    logActivity(s, "human", text, now);
+    return { ok: true, message: text };
+  });
+
+  revalidateAll();
+  return response;
 }

@@ -266,6 +266,27 @@ export function mapConversations(
   return { items, skipped, ignored };
 }
 
+/* ── 账号信息（mtop.idle.web.user.page.head）────────────────────────────── */
+
+const PROFILE_NICK = [
+  "module.base.displayName",
+  "module.base.nick",
+  "module.base.userNick",
+  "data.module.base.displayName",
+  "displayName",
+  "nick",
+];
+
+/**
+ * 读账号显示名。
+ *
+ * 拿它是为了把界面上的店铺名换成真的 —— 接上真实账号之后，侧栏还写着
+ * 示例数据里那个「老陈的数码小铺」，很容易让人以为同步错了账号。
+ */
+export function mapProfileNick(payload: unknown): string | undefined {
+  return pickString(payload, PROFILE_NICK);
+}
+
 /* ── 商品分组（xyh.item.list 带 needGroupInfo 时返回）────────────────────── */
 
 const GROUP_LIST_PATHS = ["itemGroupList", "data.itemGroupList"];

@@ -9,6 +9,7 @@ import {
   mapItemGroups,
   mapListings,
   mapOrders,
+  mapProfileNick,
   readListingMetrics,
 } from "./mapping";
 import {
@@ -409,6 +410,14 @@ export class LiveXianyuReader implements XianyuReader {
       if (mapped.items.length > 0) orders = mapped.items;
     }
 
+    // 账号显示名。拿不到不算失败 —— 少一个店铺名而已，不该让整次同步白跑。
+    let shopName: string | undefined;
+    const headOutcome = await callMtop({
+      api: VERIFIED_ENDPOINTS.userHead,
+      payload: { userId, self: true },
+    });
+    if (headOutcome.kind === "ok") shopName = mapProfileNick(headOutcome.data);
+
     // 平台自己报的分组件数。同步回来全是已售出时，这一句就能说清是
     // 「接口不对」还是「确实一件在售的都没有」。
     const notes = [describeItemGroups(listings.groups)].filter(
@@ -421,6 +430,7 @@ export class LiveXianyuReader implements XianyuReader {
       conversations,
       orders,
       notes,
+      shopName,
     };
   }
 }

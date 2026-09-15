@@ -1,3 +1,4 @@
+import { DEMO_SHOP_NAME } from "@/lib/domain/seed";
 import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
 
 export interface MergeSummary {
@@ -120,6 +121,17 @@ export function mergeSnapshot(
     }
     if (local.status !== remote.status) summary.updatedOrders += 1;
     Object.assign(local, remote);
+  }
+
+  /**
+   * 店铺名只在它还是示例数据那个名字时才跟着平台改。
+   *
+   * 一律覆盖的话，你自己改过的名字会在下一次同步时被平台的显示名冲掉；
+   * 一律不覆盖的话，接上真实账号后侧栏还挂着「老陈的数码小铺」，容易
+   * 让人以为同步错了账号。
+   */
+  if (snapshot.shopName?.trim() && state.settings.shopName === DEMO_SHOP_NAME) {
+    state.settings.shopName = snapshot.shopName.trim();
   }
 
   state.lastSyncAt = new Date(now).toISOString();

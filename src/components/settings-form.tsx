@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { resetDemoData, updateSettings } from "@/app/actions";
+import { clearDemo, resetDemoData, updateSettings } from "@/app/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,6 +36,14 @@ export function SettingsForm({ settings }: { settings: ShopSettings }) {
     startTransition(async () => {
       const result = await resetDemoData();
       toast.success(result.message);
+      router.refresh();
+    });
+
+  const clear = () =>
+    startTransition(async () => {
+      const result = await clearDemo();
+      toast[result.ok ? "success" : "error"](result.message);
+      // 店铺名可能被换成了平台上的真名，输入框要跟着更新
       router.refresh();
     });
 
@@ -87,11 +95,22 @@ export function SettingsForm({ settings }: { settings: ShopSettings }) {
         <Button onClick={save} disabled={pending}>
           保存设置
         </Button>
-        <Button variant="outline" onClick={reset} disabled={pending}>
+        <Button variant="outline" onClick={clear} disabled={pending}>
+          清除示例数据
+        </Button>
+        <Button variant="ghost" onClick={reset} disabled={pending}>
           重置示例数据
         </Button>
-        <p className="text-xs text-muted-foreground">
-          重置会把商品、消息、订单和队列恢复成初始演示状态。
+      </div>
+      <div className="space-y-1 text-xs text-muted-foreground">
+        <p>
+          <span className="font-medium">清除</span>
+          ：只删掉示例店铺（商品、消息、订单、流量、示例研究任务），
+          同步来的真实数据留着；顺便把店铺名换成平台上的真名。
+        </p>
+        <p>
+          <span className="font-medium">重置</span>
+          ：恢复成初始演示状态 —— 真实数据也会一起没了，得重新同步。
         </p>
       </div>
     </div>

@@ -373,6 +373,8 @@ export interface PlatformSnapshot {
    * 「同步回来怎么全是已售出」就不用靠猜了。
    */
   notes?: string[];
+  /** 平台上的账号显示名，用来把界面上的店铺名换成真的 */
+  shopName?: string;
 }
 
 export interface AppState {

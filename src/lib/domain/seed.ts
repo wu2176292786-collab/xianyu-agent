@@ -17,6 +17,14 @@ import type {
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
+/**
+ * 示例店铺名。
+ *
+ * 单独抽出来是为了让别处能判断「这个名字还是示例数据的」——
+ * 同步到真实账号时据此决定要不要换成平台上的真名。
+ */
+export const DEMO_SHOP_NAME = "老陈的数码小铺";
+
 function iso(now: number, offsetMs: number): string {
   return new Date(now + offsetMs).toISOString();
 }
@@ -680,7 +688,7 @@ export function createSeedState(now = Date.now()): AppState {
   const rand = mulberry32(20240614);
   return {
     settings: {
-      shopName: "老陈的数码小铺",
+      shopName: DEMO_SHOP_NAME,
       maxDiscount: 0.12,
       shipWithinHours: 24,
       signature: "—— 老陈｜工作日 22:00 前的订单当天寄出",

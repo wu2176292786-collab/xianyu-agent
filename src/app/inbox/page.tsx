@@ -1,13 +1,12 @@
 import { AgentTickButton } from "@/components/agent-tick-button";
 import { InboxView } from "@/components/inbox-view";
-import { awaitingSellerReply } from "@/lib/agent/reply";
 import { getState } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export default async function InboxPage() {
   const state = await getState();
-  const needsReply = state.conversations.filter(awaitingSellerReply).length;
+  const needsReply = state.conversations.filter((c) => c.status === "needs_reply").length;
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">

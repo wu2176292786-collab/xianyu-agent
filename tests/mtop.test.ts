@@ -12,7 +12,8 @@ import {
   readEnvelope,
   signRequest,
 } from "@/lib/adapters/live/mtop";
-import { callMtop, endpointConfig, mergeCookie } from "@/lib/adapters/live/reader";
+import { endpointConfig } from "@/lib/adapters/live/reader";
+import { callMtop, mergeCookie } from "@/lib/adapters/live/mtop-client";
 
 describe("接口配置", () => {
   const saved = { ...process.env };
@@ -26,6 +27,14 @@ describe("接口配置", () => {
     expect(endpointConfig().conversations).toEqual({
       api: "mtop.taobao.idlemessage.pc.session.sync",
       version: "3.0",
+    });
+  });
+
+  it("历史消息接口默认接上，版本是 1.0", () => {
+    delete process.env.XIANYU_API_MESSAGES;
+    expect(endpointConfig().messages).toEqual({
+      api: "mtop.taobao.idlemessage.pc.message.sync",
+      version: "1.0",
     });
   });
 

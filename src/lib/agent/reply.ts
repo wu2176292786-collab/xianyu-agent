@@ -163,6 +163,23 @@ export function awaitingSellerReply(conversation: Conversation): boolean {
   return last?.author === "buyer";
 }
 
+/** 超过这个时间的「最后一条是买家」不再当成待回复 —— 那是旧账，不是最新消息。 */
+export const FRESH_REPLY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** 只给最近还在聊的会话补历史，避免把同步名额花在几年前的对话上。 */
+export const RECENT_CHAT_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
+
+export function lastActivityAt(conversation: Conversation): number {
+  const last = conversation.messages.at(-1);
+  const at = last ? Date.parse(last.createdAt) : Number.NaN;
+  return Number.isFinite(at) ? at : 0;
+}
+
+/** 最近两周内、最后一条还是买家说的，才钉在收件箱前面。 */
+export function isFreshWait(conversation: Conversation, now: number): boolean {
+  return awaitingSellerReply(conversation) && now - lastActivityAt(conversation) <= FRESH_REPLY_WINDOW_MS;
+}
+
 /** Agent 愿意给出的最低报价：底价与「最大折扣价」取高者。 */
 export function lowestQuoteCents(listing: Listing, maxDiscount: number): number {
   const discounted = Math.round((listing.priceCents * (1 - maxDiscount)) / 100) * 100;

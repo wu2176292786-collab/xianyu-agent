@@ -1,33 +1,51 @@
 import type { XianyuReader } from "@/lib/adapters/types";
-import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
+import {
+  FRESH_REPLY_WINDOW_MS,
+  RECENT_CHAT_WINDOW_MS,
+  lastActivityAt,
+} from "@/lib/agent/reply";
+import type { AppState, Conversation, Listing, PlatformSnapshot } from "@/lib/domain/types";
 import { credentialStatus } from "./credentials";
-import { type LoginState, loadLoginState } from "./login-state";
+import { listImHistories } from "./im";
+import { loadLoginState } from "./login-state";
 import {
   type ItemGroup,
   describeItemGroups,
+  inferMessagePeer,
   mapConversations,
   mapItemGroups,
   mapListings,
+  mapMessages,
   mapOrders,
   mapProfileNick,
+  mergeInboxConversations,
+  readListingCard,
   readListingMetrics,
 } from "./mapping";
+import { type MtopOutcome } from "./mtop";
 import {
-  GOOFISH_APP_KEY,
-  type MtopOutcome,
-  backoffMs,
-  buildRequest,
-  decideRetry,
-  extractToken,
-  readEnvelope,
-} from "./mtop";
+  LiveChannelError,
+  callMtop,
+  cookieField,
+  selfUserId,
+} from "./mtop-client";
+
+// 旧调用方暂时仍可从 reader 引入；新代码应直接使用 mtop-client。
+export {
+  LiveChannelError,
+  callMtop,
+  cookieField,
+  mergeCookie,
+  selfUserId,
+} from "./mtop-client";
 
 /**
  * 接口名从环境变量配，不写死。
  *
- * 只有这两个是我实测确认存在的（未登录调用时网关返回「令牌为空」而不是
- * 「API 不存在」）。消息和订单的接口名没探到，必须你自己抓包填进来 ——
- * 与其硬编码一个猜的名字让它在运行时莫名其妙地失败，不如明确地说「没配」。
+ * 只有列在 VERIFIED_ENDPOINTS 里的是实测确认存在的（未登录调用时网关返回
+ * 「令牌为空」而不是「API 不存在」）。卖出订单的接口名还没探到，必须你
+ * 自己抓包填进来 —— 与其硬编码一个猜的名字让它在运行时莫名其妙地失败，
+ * 不如明确地说「没配」。
  *
  *   npm run xianyu:probe -- --api mtop.xxx   可以验证某个接口名是否存在
  */
@@ -46,6 +64,10 @@ export const VERIFIED_ENDPOINTS = {
   messages: "mtop.taobao.idlemessage.pc.message.sync",
   /** 商品详情，带 `{"itemId":"..."}` */
   itemDetail: "mtop.taobao.idle.pc.detail",
+  /** 网页搜索。只在你点「看对手」时打，页数可改，不后台轮询。 */
+  search: "mtop.taobao.idlemtopsearch.pc.search",
+  /** 网页 IM 令牌，发私信前换 accessToken */
+  imToken: "mtop.taobao.idlemessage.pc.login.token",
 } as const;
 
 export interface Endpoint {
@@ -56,10 +78,18 @@ export interface Endpoint {
 export interface EndpointConfig {
   listings?: Endpoint;
   conversations?: Endpoint;
+  /** 某个会话的历史消息 */
+  messages?: Endpoint;
   orders?: Endpoint;
-  /** 商品详情，用来补列表接口不给的热度数据 */
+  /** 商品详情，用来补列表接口不给的热度数据 / 会话关联商品标题 */
   itemDetail?: Endpoint;
+  /** 搜索同类。只给用户点出来的「看对手」用。 */
+  search?: Endpoint;
 }
+
+/** 读通道逐件补数的节流；请求重试的退避由 mtop-client 管理。 */
+const readerSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 /** `mtop.xxx` 或者 `mtop.xxx@3.0`，后者用来覆盖版本号。 */
 function parseEndpoint(raw: string | undefined, fallbackVersion = "1.0"): Endpoint | undefined {
@@ -76,155 +106,21 @@ export function endpointConfig(): EndpointConfig {
     conversations:
       parseEndpoint(process.env.XIANYU_API_CONVERSATIONS, "3.0") ??
       ({ api: VERIFIED_ENDPOINTS.conversations, version: "3.0" } as const),
+    messages:
+      parseEndpoint(process.env.XIANYU_API_MESSAGES) ??
+      ({ api: VERIFIED_ENDPOINTS.messages, version: "1.0" } as const),
     // 卖出订单的接口名还没确认。买到的是 mtop.idle.web.trade.bought.list，
     // 但那不是卖家要的东西，硬用会把买家订单当成自己的销售单。
     orders: parseEndpoint(process.env.XIANYU_API_ORDERS),
     itemDetail:
       parseEndpoint(process.env.XIANYU_API_ITEM_DETAIL) ??
       ({ api: VERIFIED_ENDPOINTS.itemDetail, version: "1.0" } as const),
+    search:
+      parseEndpoint(process.env.XIANYU_API_SEARCH) ??
+      ({ api: VERIFIED_ENDPOINTS.search, version: "1.0" } as const),
   };
 }
 
-/** 调用真实通道时可能出现的、需要上层特殊处理的失败。 */
-export class LiveChannelError extends Error {
-  constructor(
-    message: string,
-    readonly kind: MtopOutcome["kind"] | "not_configured",
-  ) {
-    super(message);
-    this.name = "LiveChannelError";
-  }
-}
-
-interface CallOptions {
-  api: string;
-  version?: string;
-  payload?: Record<string, unknown>;
-  maxAttempts?: number;
-  /** 注入用，方便测试退避而不用真的等 */
-  sleep?: (ms: number) => Promise<void>;
-  fetchImpl?: typeof fetch;
-  /**
-   * 注入用，省得测试里去读文件。
-   *
-   * 显式传 `null` 表示「就是没有登录态」—— 测试必须能表达这个意思，
-   * 否则它会退回去读 `.secrets/`，在开发者自己机器上拿真凭证打真网关。
-   */
-  loginState?: LoginState | null;
-}
-
-const defaultSleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * 发一次 MTOP 请求，带退避重试。
- *
- * 风控和登录失效**绝不重试**：撞上滑块还继续请求，只会让账号更危险。
- */
-export async function callMtop(options: CallOptions): Promise<MtopOutcome> {
-  const {
-    api,
-    version = "1.0",
-    payload = {},
-    maxAttempts = 3,
-    sleep = defaultSleep,
-    fetchImpl = fetch,
-  } = options;
-
-  const loginState =
-    options.loginState !== undefined ? options.loginState : await loadLoginState();
-  if (!loginState?.cookie) {
-    throw new LiveChannelError(
-      "还没有导入登录态。用扩展导出后跑 npm run xianyu:login 导入。",
-      "not_configured",
-    );
-  }
-
-  let cookie = loginState.cookie;
-  const data = JSON.stringify(payload);
-  let last: MtopOutcome = { kind: "other", ret: "", message: "还没发出任何请求" };
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const token = extractToken(cookie) ?? "";
-    const request = buildRequest({
-      api,
-      version,
-      appKey: GOOFISH_APP_KEY,
-      token,
-      timestamp: String(Date.now()),
-      data,
-    });
-
-    const response = await fetchImpl(request.url, {
-      method: "POST",
-      // 带上当初登录那个浏览器的请求头。cookie 和 User-Agent 对不上，
-      // 本身就是风控的典型触发条件。
-      headers: {
-        accept: "application/json",
-        "content-type": "application/x-www-form-urlencoded",
-        origin: "https://www.goofish.com",
-        referer: "https://www.goofish.com/",
-        ...loginState.headers,
-        cookie,
-      },
-      body: request.body,
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    // 网关换发新 token 时会带 Set-Cookie，下一次请求要用新的
-    const setCookie = response.headers.get("set-cookie");
-    if (setCookie?.includes("_m_h5_tk")) {
-      cookie = mergeCookie(cookie, setCookie);
-    }
-
-    last = readEnvelope((await response.json()) as Record<string, unknown>);
-    if (last.kind === "ok") return last;
-
-    const decision = decideRetry(last.kind, attempt, maxAttempts);
-    if (decision === "give_up") return last;
-    await sleep(backoffMs(attempt));
-  }
-
-  return last;
-}
-
-/**
- * 我自己的用户 id，藏在 cookie 的 `unb` 里。
- *
- * 两个地方少不了它：商品列表接口要 `userId` 才肯返回（不给就是
- * `FAIL_BIZ_BAD_REQUEST`），会话列表要靠它认出哪一边是对方。
- */
-export function selfUserId(cookie: string): string | undefined {
-  return cookie.match(/(?:^|;\s*)unb=([^;]+)/)?.[1];
-}
-
-/** 用新的 Set-Cookie 覆盖同名字段，其余原样保留。 */
-export function mergeCookie(cookie: string, setCookie: string): string {
-  const updates = new Map<string, string>();
-  for (const chunk of setCookie.split(/,(?=\s*[^;=]+=)/)) {
-    const [pair] = chunk.split(";");
-    const index = pair.indexOf("=");
-    if (index > 0) updates.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim());
-  }
-
-  const kept = cookie
-    .split(";")
-    .map((pair) => pair.trim())
-    .filter(Boolean)
-    .map((pair) => {
-      const index = pair.indexOf("=");
-      const name = index > 0 ? pair.slice(0, index) : pair;
-      if (updates.has(name)) {
-        const value = `${name}=${updates.get(name)}`;
-        updates.delete(name);
-        return value;
-      }
-      return pair;
-    });
-
-  for (const [name, value] of updates) kept.push(`${name}=${value}`);
-  return kept.join("; ");
-}
 
 function explain(outcome: MtopOutcome, api: string): LiveChannelError {
   const hints: Record<string, string> = {
@@ -347,9 +243,130 @@ async function enrichOnSaleMetrics(
 }
 
 /**
+ * 一次同步最多拉几个会话的历史。每个会话一次请求，打太多是风控信号。
+ * 只补最近还在聊的，按最后一条时间倒序 —— 最新的先拿。
+ */
+const MAX_HISTORY = 15;
+
+/** 一次同步最多给几条会话补商品标题。同样是一件一次请求。 */
+const MAX_TITLE_LOOKUPS = 15;
+
+/**
+ * 给会话补上完整聊天记录。
+ *
+ * 会话列表只给最后一条摘要。HTTP 的 `message.sync` 现在会回 FAIL_BIZ_120，
+ * 历史改走网页 IM 的 `/r/MessageManager/listUserMessages`。
+ * 风控立刻停手。
+ */
+async function loadInbox(
+  httpItems: Conversation[],
+  existing: Conversation[],
+  selfUserId: string | undefined,
+  selfNicks: string[],
+  now: number,
+): Promise<{ conversations: Conversation[]; historyFilled: number }> {
+  const recentIds = [...httpItems, ...existing]
+    .filter((conversation) => now - lastActivityAt(conversation) <= RECENT_CHAT_WINDOW_MS)
+    .sort((a, b) => lastActivityAt(b) - lastActivityAt(a))
+    .map((conversation) => conversation.id);
+
+  const history = await listImHistories(recentIds.slice(0, MAX_HISTORY), {
+    now,
+    collectMs: 5_000,
+    maxConversations: MAX_HISTORY,
+  });
+  if (history.riskControl) {
+    throw new LiveChannelError(history.message, "risk_control");
+  }
+
+  const conversations = mergeInboxConversations(httpItems, history.sessions, existing);
+  let filled = 0;
+  for (const conversation of conversations) {
+    const payload = history.payloads.get(conversation.id);
+    if (!payload) continue;
+
+    const inferred = inferMessagePeer(payload, selfUserId, selfNicks);
+    const peer = {
+      peerId: conversation.buyerId ?? inferred.peerId,
+      peerNicks: [
+        ...(conversation.buyerName && conversation.buyerName !== "买家"
+          ? [conversation.buyerName]
+          : []),
+        ...(inferred.peerNicks ?? []),
+      ],
+    };
+    const mapped = mapMessages(payload, now, selfUserId, selfNicks, peer);
+    if (mapped.items.length === 0) continue;
+
+    conversation.messages = mapped.items;
+    conversation.buyerId = peer.peerId ?? conversation.buyerId;
+    const peerNick = peer.peerNicks.find((name) => name && name !== "买家");
+    if (peerNick) conversation.buyerName = peerNick;
+    if (conversation.status !== "closed") {
+      const last = mapped.items.at(-1);
+      const lastAt = last ? Date.parse(last.createdAt) : 0;
+      conversation.status =
+        last?.author === "buyer" && now - lastAt <= FRESH_REPLY_WINDOW_MS
+          ? "needs_reply"
+          : "awaiting_buyer";
+    }
+    filled += 1;
+  }
+
+  conversations.sort((left, right) => lastActivityAt(right) - lastActivityAt(left));
+  return {
+    conversations: conversations.filter((conversation) => conversation.messages.length > 0),
+    historyFilled: filled,
+  };
+}
+
+/**
+ * 给对不上本店库存的会话补商品标题。
+ *
+ * 会话只带 itemId。很多会话谈的不是当前在架的货，对不上 listings 是常态，
+ * 不能因此在消息页写成「未知商品」。标题挂在会话上，不写进本店商品列表。
+ */
+async function enrichConversationListings(
+  conversations: Conversation[],
+  listings: Listing[],
+  endpoint: Endpoint,
+  sleep: (ms: number) => Promise<void>,
+): Promise<number> {
+  const known = new Set(listings.map((listing) => listing.id));
+  const targets = [...conversations]
+    .filter(
+      (conversation) =>
+        conversation.listingId &&
+        !known.has(conversation.listingId) &&
+        !conversation.listingTitle,
+    )
+    .sort((a, b) => lastActivityAt(b) - lastActivityAt(a))
+    .slice(0, MAX_TITLE_LOOKUPS);
+
+  let filled = 0;
+  for (const conversation of targets) {
+    const outcome = await callMtop({
+      api: endpoint.api,
+      version: endpoint.version,
+      payload: { itemId: conversation.listingId },
+    });
+    if (outcome.kind === "risk_control") throw explain(outcome, endpoint.api);
+    if (outcome.kind !== "ok") continue;
+
+    const card = readListingCard(outcome.data);
+    if (!card.title) continue;
+    conversation.listingTitle = card.title;
+    if (card.priceCents !== undefined) conversation.listingPriceCents = card.priceCents;
+    filled += 1;
+    await sleep(400);
+  }
+  return filled;
+}
+
+/**
  * 真实读通道。
  *
- * 只读 —— 它没有任何写操作。写操作走 `XianyuAdapter`，而且必须穿过
+ * 只负责拉商品和会话。写操作走 `LiveXianyuAdapter`，而且必须穿过
  * `GuardedAdapter` 的护栏。
  */
 export class LiveXianyuReader implements XianyuReader {
@@ -377,24 +394,57 @@ export class LiveXianyuReader implements XianyuReader {
       );
     }
 
+    const sameAccount = !state.settings.accountUserId || state.settings.accountUserId === userId;
     const listings = await fetchAllListings(endpoints.listings, userId, now);
 
     // 列表接口不给热度数据，只能对在售商品逐件补
     if (endpoints.itemDetail) {
-      await enrichOnSaleMetrics(listings.items, endpoints.itemDetail, defaultSleep);
+      await enrichOnSaleMetrics(listings.items, endpoints.itemDetail, readerSleep);
     }
 
-    // 会话列表只认 fetchNum 这一个必填参数；系统会话在映射层按 sessionType 过滤
+    // 账号显示名先拿：后面认「哪条消息是自己发的」要用到昵称。
+    // 拿不到不算失败 —— 少一个店铺名而已，不该让整次同步白跑。
+    let shopName: string | undefined;
+    const headOutcome = await callMtop({
+      api: VERIFIED_ENDPOINTS.userHead,
+      payload: { userId, self: true },
+    });
+    if (headOutcome.kind === "ok") shopName = mapProfileNick(headOutcome.data);
+
+    const selfNicks = [shopName, cookieField(loginState?.cookie ?? "", "tracknick")].filter(
+      (nick): nick is string => Boolean(nick?.trim()),
+    );
+
+    // 会话列表只认 fetchNum。真人私聊经常不在这次返回里，要靠 IM 长连补。
     let conversations = state.conversations;
+    let historyFilled = 0;
+    let titlesFilled = 0;
     if (endpoints.conversations) {
       const outcome = await callMtop({
         api: endpoints.conversations.api,
         version: endpoints.conversations.version,
-        payload: { fetchNum: 30 },
+        payload: { fetchNum: 50 },
       });
       if (outcome.kind !== "ok") throw explain(outcome, endpoints.conversations.api);
       const mapped = mapConversations(outcome.data, now, userId);
-      if (mapped.items.length > 0) conversations = mapped.items;
+      const inbox = await loadInbox(
+        mapped.items,
+        sameAccount ? state.conversations : [],
+        userId,
+        selfNicks,
+        now,
+      );
+      conversations = inbox.conversations;
+      historyFilled = inbox.historyFilled;
+
+      if (endpoints.itemDetail && conversations.length > 0) {
+        titlesFilled = await enrichConversationListings(
+          conversations,
+          listings.items,
+          endpoints.itemDetail,
+          readerSleep,
+        );
+      }
     }
 
     // 卖出订单的接口名还没确认，没配就保留本地的，而不是把它们清空
@@ -410,27 +460,22 @@ export class LiveXianyuReader implements XianyuReader {
       if (mapped.items.length > 0) orders = mapped.items;
     }
 
-    // 账号显示名。拿不到不算失败 —— 少一个店铺名而已，不该让整次同步白跑。
-    let shopName: string | undefined;
-    const headOutcome = await callMtop({
-      api: VERIFIED_ENDPOINTS.userHead,
-      payload: { userId, self: true },
-    });
-    if (headOutcome.kind === "ok") shopName = mapProfileNick(headOutcome.data);
-
     // 平台自己报的分组件数。同步回来全是已售出时，这一句就能说清是
     // 「接口不对」还是「确实一件在售的都没有」。
-    const notes = [describeItemGroups(listings.groups)].filter(
-      (note): note is string => note !== undefined,
-    );
+    const notes = [
+      describeItemGroups(listings.groups),
+      historyFilled > 0 ? `补了 ${historyFilled} 个最近会话的聊天记录` : undefined,
+      titlesFilled > 0 ? `认出 ${titlesFilled} 件会话关联商品` : undefined,
+    ].filter((note): note is string => note !== undefined);
 
     return {
       fetchedAt: new Date(now).toISOString(),
-      listings: listings.items.length > 0 ? listings.items : state.listings,
+      listings: listings.items.length > 0 || !sameAccount ? listings.items : state.listings,
       conversations,
       orders,
       notes,
       shopName,
+      accountUserId: userId,
     };
   }
 }

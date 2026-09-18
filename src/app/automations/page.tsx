@@ -95,7 +95,7 @@ export default async function AutomationsPage() {
           </p>
           <p>
             <span className="text-muted-foreground">数据存储：</span>
-            本地 JSON 文件 .data/state.json
+            内存缓存 + 本地 JSON（.data/state.json）
           </p>
         </CardContent>
       </Card>

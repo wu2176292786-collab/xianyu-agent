@@ -1,19 +1,30 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { draftReplyFor, sendReply } from "@/app/actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { INTENT_LABEL, awaitingSellerReply, classifyIntent } from "@/lib/agent/reply";
+import { INTENT_LABEL, classifyIntent, lastActivityAt } from "@/lib/agent/reply";
 import type { Conversation, Listing } from "@/lib/domain/types";
 import { clockTime, relativeTime, yuan } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function lastMessage(conversation: Conversation) {
   return conversation.messages.at(-1);
+}
+
+function productOf(conversation: Conversation, listing: Listing | undefined) {
+  const title = listing?.title ?? conversation.listingTitle;
+  const priceCents = listing?.priceCents ?? conversation.listingPriceCents;
+  return {
+    title,
+    priceCents,
+    floorPriceCents: listing?.floorPriceCents,
+    emoji: listing?.emoji ?? "📦",
+  };
 }
 
 export function InboxView({
@@ -31,30 +42,27 @@ export function InboxView({
   const ordered = useMemo(
     () =>
       [...conversations].sort((a, b) => {
-        const aNeeds = awaitingSellerReply(a) ? 0 : 1;
-        const bNeeds = awaitingSellerReply(b) ? 0 : 1;
-        if (aNeeds !== bNeeds) return aNeeds - bNeeds;
-        return (
-          Date.parse(lastMessage(b)?.createdAt ?? "") -
-          Date.parse(lastMessage(a)?.createdAt ?? "")
-        );
+        const aHot = a.status === "needs_reply" ? 0 : 1;
+        const bHot = b.status === "needs_reply" ? 0 : 1;
+        if (aHot !== bHot) return aHot - bHot;
+        return lastActivityAt(b) - lastActivityAt(a);
       }),
     [conversations],
   );
 
   const [selectedId, setSelectedId] = useState(ordered[0]?.id ?? "");
-  const [draft, setDraft] = useState("");
-  const [draftOwner, setDraftOwner] = useState(selectedId);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [pending, startTransition] = useTransition();
   const router = useRouter();
+  const threadRef = useRef<HTMLDivElement>(null);
 
   const selected = ordered.find((c) => c.id === selectedId) ?? ordered[0];
 
-  // 切换会话时丢掉上一条草稿，避免把回复发错人。
-  if (draftOwner !== selectedId) {
-    setDraftOwner(selectedId);
-    setDraft("");
-  }
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    thread.scrollTop = thread.scrollHeight;
+  }, [selected?.id, selected?.messages.length]);
 
   if (!selected) {
     return (
@@ -66,7 +74,9 @@ export function InboxView({
   }
 
   const listing = listingById.get(selected.listingId);
-  const needsReply = awaitingSellerReply(selected);
+  const selectedProduct = productOf(selected, listing);
+  const needsReply = selected.status === "needs_reply";
+  const draft = drafts[selected.id] ?? "";
 
   const generate = () =>
     startTransition(async () => {
@@ -75,7 +85,7 @@ export function InboxView({
         toast.error(result.message);
         return;
       }
-      setDraft(result.text);
+      setDrafts((current) => ({ ...current, [selected.id]: result.text }));
       toast.success(result.message);
     });
 
@@ -84,18 +94,19 @@ export function InboxView({
       const result = await sendReply(selected.id, draft);
       toast[result.ok ? "success" : "error"](result.message);
       if (result.ok) {
-        setDraft("");
+        setDrafts((current) => ({ ...current, [selected.id]: "" }));
         router.refresh();
       }
     });
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
-      <div className="rounded-lg border bg-background">
-        <div className="max-h-72 overflow-y-auto lg:max-h-[70vh]">
+    <div className="grid gap-4 lg:h-[min(44rem,calc(100dvh-12rem))] lg:grid-cols-[22rem_1fr]">
+      <div className="flex min-h-0 flex-col rounded-lg border bg-background">
+        <div className="max-h-72 min-h-0 overflow-y-auto lg:max-h-none lg:flex-1">
           {ordered.map((conversation) => {
             const item = lastMessage(conversation);
             const conversationListing = listingById.get(conversation.listingId);
+            const product = productOf(conversation, conversationListing);
             const intent = item
               ? classifyIntent(
                   [...conversation.messages].reverse().find((m) => m.author === "buyer")?.text ??
@@ -119,7 +130,7 @@ export function InboxView({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="truncate text-sm font-medium">{conversation.buyerName}</p>
-                    {awaitingSellerReply(conversation) ? (
+                    {conversation.status === "needs_reply" ? (
                       <span className="size-1.5 shrink-0 rounded-full bg-rose-500" />
                     ) : null}
                     <span className="ml-auto shrink-0 text-xs text-muted-foreground">
@@ -127,7 +138,7 @@ export function InboxView({
                     </span>
                   </div>
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {conversationListing?.title ?? "未知商品"}
+                    {product.title ?? "未知商品"}
                   </p>
                   <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">
                     {item?.author === "seller" ? "我：" : ""}
@@ -143,8 +154,8 @@ export function InboxView({
         </div>
       </div>
 
-      <div className="flex min-h-[28rem] flex-col rounded-lg border bg-background">
-        <div className="flex flex-wrap items-start justify-between gap-2 border-b px-4 py-3">
+      <div className="flex min-h-[28rem] max-h-[min(40rem,70vh)] flex-col rounded-lg border bg-background lg:max-h-none lg:min-h-0">
+        <div className="flex shrink-0 flex-wrap items-start justify-between gap-2 border-b px-4 py-3">
           <div className="min-w-0">
             <p className="flex items-center gap-2 text-sm font-medium">
               <span aria-hidden>{selected.buyerEmoji}</span>
@@ -152,20 +163,24 @@ export function InboxView({
               {needsReply ? <Badge variant="secondary">待回复</Badge> : null}
             </p>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
-              {listing ? `${listing.emoji} ${listing.title}` : "未知商品"}
+              {selectedProduct.title
+                ? `${selectedProduct.emoji} ${selectedProduct.title}`
+                : "未知商品"}
             </p>
           </div>
-          {listing ? (
+          {selectedProduct.priceCents !== undefined ? (
             <div className="text-right text-xs text-muted-foreground">
               <p className="text-sm font-medium text-foreground tabular-nums">
-                {yuan(listing.priceCents)}
+                {yuan(selectedProduct.priceCents)}
               </p>
-              <p>底价 {yuan(listing.floorPriceCents)}</p>
+              {selectedProduct.floorPriceCents !== undefined ? (
+                <p>底价 {yuan(selectedProduct.floorPriceCents)}</p>
+              ) : null}
             </div>
           ) : null}
         </div>
 
-        <div className="flex flex-1 flex-col justify-end gap-3 overflow-y-auto px-4 py-4">
+        <div ref={threadRef} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4">
           {selected.messages.map((message) => (
             <div
               key={message.id}
@@ -192,12 +207,14 @@ export function InboxView({
           ))}
         </div>
 
-        <div className="space-y-2 border-t px-4 py-3">
+        <div className="shrink-0 space-y-2 border-t px-4 py-3">
           <Textarea
             rows={3}
             value={draft}
             placeholder="写一条回复，或者让 Agent 先起草…"
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) =>
+              setDrafts((current) => ({ ...current, [selected.id]: event.target.value }))
+            }
           />
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" variant="outline" disabled={pending} onClick={generate}>

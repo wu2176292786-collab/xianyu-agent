@@ -1,3 +1,4 @@
+import { runMissingHeatPull, runWatchPull } from "@/lib/research/pull";
 import { mutateState } from "@/lib/store";
 import { shouldRunScheduledTick } from "./engine";
 import { performTick } from "./tick";
@@ -7,18 +8,32 @@ const CHECK_INTERVAL_MS = 30_000;
 
 declare global {
   var __xianyuAgentScheduler: NodeJS.Timeout | undefined;
+  var __xianyuHeatPulling: boolean | undefined;
 }
 
 async function tickIfDue(): Promise<void> {
   try {
-    await mutateState((state) => {
+    await mutateState(async (state) => {
       const now = Date.now();
       if (!shouldRunScheduledTick(state, now)) return;
-      performTick(state, now, "scheduled");
+      await performTick(state, now, "scheduled");
     });
   } catch (error) {
     // 定时器里不能抛，否则整个进程会挂掉。
     console.error("[agent] 自动巡检出错：", error);
+  }
+
+  if (globalThis.__xianyuHeatPulling) return;
+  globalThis.__xianyuHeatPulling = true;
+  try {
+    // 盯住的货按全局间隔采，先让它跑；两者共用同一个冷却，
+    // 谁先跑起来另一个就等下一轮。
+    await runWatchPull();
+    await runMissingHeatPull({ auto: true });
+  } catch (error) {
+    console.error("[research] 监控热度采集出错：", error);
+  } finally {
+    globalThis.__xianyuHeatPulling = false;
   }
 }
 

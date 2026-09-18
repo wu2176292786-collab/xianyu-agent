@@ -7,6 +7,7 @@ import {
   confirmFloorPrice,
   delistListing,
   refreshListing,
+  scoutListingCompetition,
   updateListingPrice,
 } from "@/app/actions";
 import { Badge } from "@/components/ui/badge";
@@ -134,6 +135,24 @@ export function ListingsTable({ listings }: { listings: Listing[] }) {
                 </TableCell>
                 <TableCell>
                   <div className="flex justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={pending}
+                      onClick={() => {
+                        startTransition(async () => {
+                          const result = await scoutListingCompetition(listing.id);
+                          toast[result.ok ? "success" : "error"](result.message);
+                          if (result.ok && result.taskId) {
+                            router.push(`/research?task=${result.taskId}`);
+                            return;
+                          }
+                          router.refresh();
+                        });
+                      }}
+                    >
+                      看对手
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"

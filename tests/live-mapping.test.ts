@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   describeItemGroups,
+  inferMessagePeer,
   mapConversations,
   mapItemGroups,
+  mergeInboxConversations,
   mapListings,
+  mapMessages,
   mapOrders,
+  messageAuthor,
+  messageSyncReq,
+  readListingCard,
   readListingMetrics,
 } from "@/lib/adapters/live/mapping";
 import { describeShape, getList, getPath, pick, pickNumber } from "@/lib/adapters/live/paths";
@@ -139,6 +145,19 @@ describe("商品映射", () => {
    * 详情接口的真实字段名，照抄实测结果。
    * 列表接口不给热度数据，这些只能从详情补。
    */
+  it("从商品详情里读出标题和价格，给会话页用", () => {
+    const detail = {
+      itemDO: { itemId: 1070659254313, title: "追觅S7剃须刀 黑色", soldPrice: "268" },
+    };
+    expect(readListingCard(detail)).toEqual({
+      id: "1070659254313",
+      title: "追觅S7剃须刀 黑色",
+      priceCents: 26800,
+    });
+    expect(readListingCard({ data: detail }).title).toBe("追觅S7剃须刀 黑色");
+    expect(readListingCard({ itemDO: { soldPrice: "200" } }).title).toBeUndefined();
+  });
+
   it("从商品详情里读出浏览 / 想要 / 库存", () => {
     const detail = {
       itemDO: { browseCnt: 687, wantCnt: 5, quantity: 1, collectCnt: 2, soldPrice: "200" },
@@ -239,6 +258,7 @@ describe("商品映射", () => {
     expect(items[0]).toMatchObject({
       id: "8001",
       buyerName: "会走路的鱼",
+      buyerId: "2222",
       listingId: "812345",
       status: "needs_reply",
     });
@@ -289,6 +309,30 @@ describe("商品映射", () => {
     expect(ignored).toBe(2);
   });
 
+  it("摘要带发送者 id 时，最后一条按 id 认，不靠未读数瞎猜", () => {
+    const payload = {
+      sessions: [
+        {
+          message: {
+            summary: {
+              summary: "刀还在的",
+              ts: NOW - 60_000,
+              unread: 0,
+              senderUserId: "2222",
+            },
+          },
+          session: {
+            sessionId: 8002,
+            sessionType: 1,
+            userInfo: { userId: "2222", nick: "t***5" },
+            ownerInfo: { userId: "1111", nick: "我自己" },
+          },
+        },
+      ],
+    };
+    expect(mapConversations(payload, NOW, "1111").items[0].messages[0].author).toBe("buyer");
+  });
+
   it("未读为 0 的会话算等买家回，不会催着 Agent 去回复", () => {
     const payload = {
       data: {
@@ -303,11 +347,270 @@ describe("商品映射", () => {
     expect(items[0].messages[0].author).toBe("seller");
   });
 
+  it("按最后一条时间倒序，最新的会话排前面", () => {
+    const payload = {
+      sessions: [
+        {
+          message: { summary: { summary: "去年的还在吗", ts: NOW - 400 * 86400_000, unread: 1 } },
+          session: { sessionId: 1, sessionType: 1, userInfo: { userId: "2", nick: "旧买家" } },
+        },
+        {
+          message: { summary: { summary: "248 可出嘛", ts: NOW - 60_000, unread: 1 } },
+          session: { sessionId: 2, sessionType: 1, userInfo: { userId: "3", nick: "新买家" } },
+        },
+      ],
+    };
+
+    const { items } = mapConversations(payload, NOW, "1");
+    expect(items.map((item) => item.id)).toEqual(["2", "1"]);
+    expect(items[0].buyerName).toBe("新买家");
+  });
+
+  it("超过两周的未读会话不当成待回复", () => {
+    const payload = {
+      sessions: [
+        {
+          message: { summary: { summary: "还在吗", ts: NOW - 40 * 86400_000, unread: 3 } },
+          session: { sessionId: 9, sessionType: 1, userInfo: { userId: "2", nick: "旧买家" } },
+        },
+      ],
+    };
+
+    const { items } = mapConversations(payload, NOW, "1");
+    expect(items[0].status).toBe("awaiting_buyer");
+    expect(items[0].messages[0].author).toBe("buyer");
+  });
+
   it("意图不在映射层瞎猜，交给规则引擎按文本判定", () => {
     const payload = {
       data: { sessions: [{ sessionId: "S3", content: "退货", unreadCount: 1 }] },
     };
     expect(mapConversations(payload, NOW).items[0].intent).toBe("other");
+  });
+
+  it("历史消息接口的 req 必须是字符串，字段是 fetchs", () => {
+    expect(messageSyncReq("34543055754")).toEqual({
+      req: JSON.stringify({ sessionId: "34543055754", start: 0, fetchs: 50, type: 1 }),
+    });
+  });
+
+  /** 真实的 message.sync 返回形状，字段名照抄实测结果。 */
+  function realMessages() {
+    return {
+      messages: [
+        {
+          messageUuid: "m-older",
+          arg1: "MsgText",
+          content: { contentType: 1, text: { text: "最近有没有维斯要出？" } },
+          senderInfo: { nick: "tb578526545", userId: "2***1" },
+          timeStamp: NOW - 120_000,
+        },
+        {
+          messageUuid: "m-buyer",
+          arg1: "MsgText",
+          content: { contentType: 1, text: { text: "有的，你看这只" } },
+          senderInfo: { nick: "欣***原", userId: "9***0" },
+          timeStamp: NOW - 60_000,
+        },
+        {
+          messageUuid: "m-pic",
+          arg1: "MsgImage",
+          content: { contentType: 2 },
+          senderInfo: { nick: "欣***原", userId: "9***0" },
+          timeStamp: NOW - 30_000,
+        },
+        {
+          messageUuid: "m-latest",
+          content: { text: { text: "就来问下你" } },
+          senderInfo: { nick: "tb578526545", userId: "1111" },
+          timeStamp: NOW,
+        },
+      ],
+    };
+  }
+
+  it("认得出真实 message.sync 的嵌套结构，并按时间排好", () => {
+    const { items, skipped } = mapMessages(realMessages(), NOW, "1111", ["tb578526545"]);
+    expect(skipped).toBe(0);
+    expect(items.map((m) => m.text)).toEqual([
+      "最近有没有维斯要出？",
+      "有的，你看这只",
+      "[图片]",
+      "就来问下你",
+    ]);
+    expect(items[0].author).toBe("seller");
+    expect(items[1].author).toBe("buyer");
+    expect(items[3].author).toBe("seller");
+  });
+
+  it("认得出 IM listUserMessages 的 messageId / createAt / reminderContent", () => {
+    const { items, skipped } = mapMessages(
+      {
+        userMessageModels: [
+          {
+            message: {
+              messageId: "m-buyer",
+              createAt: NOW - 60_000,
+              extension: {
+                senderUserId: "2222",
+                reminderTitle: "会走路的鱼",
+                reminderContent: "还在吗",
+              },
+              content: { contentType: 101, custom: { type: 1, data: "" } },
+            },
+          },
+          {
+            message: {
+              messageId: "m-seller",
+              createAt: NOW - 30_000,
+              extension: {
+                senderUserId: "1111",
+                reminderTitle: "我自己",
+                reminderContent: "在的",
+              },
+            },
+          },
+        ],
+      },
+      NOW,
+      "1111",
+      ["我自己"],
+      { peerId: "2222" },
+    );
+    expect(skipped).toBe(0);
+    expect(items.map((message) => ({ author: message.author, text: message.text }))).toEqual([
+      { author: "buyer", text: "还在吗" },
+      { author: "seller", text: "在的" },
+    ]);
+  });
+
+  it("能从历史里认出对方的 id 和昵称", () => {
+    expect(
+      inferMessagePeer(
+        {
+          userMessageModels: [
+            {
+              message: {
+                extension: { senderUserId: "1111", reminderTitle: "我自己" },
+              },
+            },
+            {
+              message: {
+                extension: { senderUserId: "2222", reminderTitle: "会走路的鱼" },
+              },
+            },
+          ],
+        },
+        "1111",
+        ["我自己"],
+      ),
+    ).toEqual({ peerId: "2222", peerNicks: ["会走路的鱼"] });
+  });
+
+  it("IM 推来的真人会话会并进收件箱，并丢掉过期摘要", () => {
+    const existing = [
+      {
+        id: "stale",
+        buyerName: "旧买家",
+        buyerEmoji: "🐟",
+        listingId: "",
+        status: "awaiting_buyer" as const,
+        intent: "other" as const,
+        messages: [{ id: "s", author: "seller" as const, text: "在的", createdAt: new Date(NOW).toISOString() }],
+      },
+    ];
+    const merged = mergeInboxConversations(
+      [],
+      [{ cid: "60585751957", sessionType: 1, itemId: "812345" }],
+      existing,
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: "60585751957", listingId: "812345" });
+  });
+
+  it("HTTP 和 IM 都没有新会话时，保留本地收件箱", () => {
+    const existing = [
+      {
+        id: "keep",
+        buyerName: "买家",
+        buyerEmoji: "🐟",
+        listingId: "",
+        status: "awaiting_buyer" as const,
+        intent: "other" as const,
+        messages: [],
+      },
+    ];
+    expect(mergeInboxConversations([], [], existing)).toEqual(existing);
+  });
+
+  it("脱敏的 userId 对不上自己时，改用昵称认出发送者", () => {
+    const record = { senderInfo: { nick: "老陈的数码小铺", userId: "2***1" } };
+    expect(messageAuthor(record, "2221529979637", ["老陈的数码小铺"])).toBe("seller");
+    expect(messageAuthor(record, "2221529979637", [])).toBe("buyer");
+  });
+
+  it("网页 IM 那层套壳和 base64 正文也能抽出来，不会只剩自己发的", () => {
+    const data = Buffer.from(
+      JSON.stringify({ contentType: 1, text: { text: "刀还在的，包邮" } }),
+      "utf8",
+    ).toString("base64");
+    const { items, skipped } = mapMessages(
+      {
+        messages: [
+          {
+            messageUuid: "mine",
+            content: { contentType: 1, text: { text: "2488 可出嘛" } },
+            senderInfo: { userId: "1111", nick: "tb578526545" },
+            timeStamp: NOW - 60_000,
+          },
+          {
+            message: {
+              messageUuid: "theirs",
+              content: { contentType: 101, custom: { type: 1, data } },
+              senderInfo: { userId: "2222", nick: "t***5" },
+              extension: { senderUserId: "2222", reminderContent: "刀还在的，包邮" },
+              timeStamp: NOW,
+            },
+          },
+        ],
+      },
+      NOW,
+      "1111",
+      ["tb578526545"],
+      { peerId: "2222", peerNicks: ["t***5"] },
+    );
+    expect(skipped).toBe(0);
+    expect(items.map((m) => [m.author, m.text])).toEqual([
+      ["seller", "2488 可出嘛"],
+      ["buyer", "刀还在的，包邮"],
+    ]);
+  });
+
+  it("对方的 id / 昵称能把话标回买家，不会全部算成我", () => {
+    expect(
+      messageAuthor(
+        { senderInfo: { userId: "2222", nick: "刀店老板" } },
+        "1111",
+        ["tb578526545"],
+        { peerId: "2222", peerNicks: ["刀店老板"] },
+      ),
+    ).toBe("buyer");
+  });
+
+  it("缺 id 或正文的历史消息跳过，不编一句出来", () => {
+    const { items, skipped } = mapMessages(
+      {
+        messages: [
+          { messageUuid: "ok", content: { text: { text: "在的" } }, senderInfo: { nick: "买家" } },
+          { content: { text: { text: "没有 id" } } },
+          { messageUuid: "empty", content: { contentType: 1 } },
+        ],
+      },
+      NOW,
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe("在的");
+    expect(skipped).toBe(2);
   });
 
   it("缺会话 id 或最后一条消息的记录直接跳过", () => {

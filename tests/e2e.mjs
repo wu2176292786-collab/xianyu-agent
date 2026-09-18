@@ -1,5 +1,5 @@
 /**
- * 浏览器冒烟测试：把审批、回复、擦亮、发货、规则开关跑一遍。
+ * 浏览器冒烟测试：把审批、回复、擦亮、队列备单、规则开关跑一遍。
  *
  * 需要先起服务（`npm run dev` 或 `npm run build && npm run start`），然后：
  *   npm run test:e2e
@@ -12,7 +12,10 @@ import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
 const CHROME =
-  process.env.CHROME_PATH ?? "/usr/bin/google-chrome-stable";
+  process.env.CHROME_PATH ??
+  (process.platform === "darwin"
+    ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    : "/usr/bin/google-chrome-stable");
 const results = [];
 let failures = 0;
 
@@ -27,7 +30,8 @@ function check(name, ok, detail = "") {
  * 所以先把状态文件抄一份，跑完（哪怕是崩了）再放回去 —— 在接了真实账号的
  * 机器上跑一次测试，不该让人重新同步一遍。
  */
-const STATE_FILE = path.join(process.cwd(), ".data", "state.json");
+const STATE_FILE =
+  process.env.XIANYU_STATE_FILE ?? path.join(process.cwd(), ".data", "state.json");
 let savedState = null;
 try {
   savedState = await readFile(STATE_FILE, "utf8");
@@ -75,7 +79,11 @@ const page = await browser.newPage({
 const pageErrors = [];
 page.on("pageerror", (err) => pageErrors.push(err.message));
 page.on("console", (msg) => {
-  if (msg.type() === "error" && !msg.text().includes("_rsc")) pageErrors.push(msg.text());
+  const text = msg.text();
+  // Next 的 RSC 预取和本地采集夹具里的图片请求都可能留下 404 控制台噪声；
+  // 它们不是页面执行异常。真正的 runtime error 仍由 pageerror 与其余 error 捕获。
+  const ignored = text.includes("_rsc") || /Failed to load resource:.*status of 404/.test(text);
+  if (msg.type() === "error" && !ignored) pageErrors.push(text);
 });
 
 const text = () => page.locator("body").innerText();
@@ -127,9 +135,20 @@ await checkToast("重置示例数据", /已重置/);
 // ---------- 1. dashboard ----------
 await page.goto(BASE, { waitUntil: "networkidle" });
 const dash = await text();
-check("总览 renders KPI cards", /近 7 天曝光/.test(dash) && /待发货订单/.test(dash));
+check("总览 renders KPI cards", /近 7 天曝光/.test(dash) && /在售商品/.test(dash));
 check("总览 renders chart", /近 14 天流量与成交/.test(dash) && /每日成交额/.test(dash));
-check("sidebar has 7 nav items", (await page.locator("aside nav a").count()) === 7);
+check("sidebar 没有订单", (await page.locator("aside nav").getByRole("link", { name: "订单" }).count()) === 0);
+check(
+  "总览提供手动刷新店铺商品数据",
+  (await page.getByRole("button", { name: "刷新店铺数据" }).count()) === 1,
+);
+await clickUntil(
+  page.getByRole("button", { name: "刷新店铺数据" }),
+  page.locator("[data-sonner-toast]").first(),
+);
+await checkToast("手动刷新店铺数据 succeeds", /同步完成/);
+await page.getByText(/上次刷新/).waitFor({ state: "visible", timeout: 8_000 });
+check("总览显示店铺数据刷新时间", /上次刷新/.test(await text()));
 
 // ---------- 2. run the agent ----------
 await clickUntil(
@@ -247,20 +266,16 @@ await page.waitForTimeout(1800);
 await checkToast("手动改价也被底价拦住", /低于底价/);
 await page.keyboard.press("Escape");
 
-// ---------- 6. orders ----------
-await page.goto(`${BASE}/orders`, { waitUntil: "networkidle" });
-const shipButtons = page.getByRole("button", { name: "发货" });
-const shipCount = await shipButtons.count();
-check("有待发货订单", shipCount > 0, `${shipCount} shippable`);
-if (shipCount > 0) {
-  const trackInput = page.locator('[role="dialog"] input').nth(1);
-  await clickUntil(shipButtons.first(), trackInput);
-  await trackInput.fill("SF999888777");
-  await page.locator('[role="dialog"]').getByRole("button", { name: "确认发货" }).click();
-  await page.waitForTimeout(2500);
-  await checkToast("发货成功", /已发货：/);
-  check("订单表出现运单号", (await text()).includes("SF999888777"));
-}
+// ---------- 6. 队列里确认备单 ----------
+await page.goto(`${BASE}/queue`, { waitUntil: "networkidle" });
+const shipCard = page.locator('[data-slot="card"]').filter({ hasText: "备货发出订单" }).first();
+check("有超时备单建议", (await shipCard.count()) > 0);
+const trackInput = page.locator('[role="dialog"] input').nth(1);
+await clickUntil(shipCard.getByRole("button", { name: "编辑后通过" }), trackInput);
+await trackInput.fill("SF999888777");
+await page.locator('[role="dialog"]').getByRole("button", { name: "确认执行" }).click();
+await page.waitForTimeout(2500);
+await checkToast("备单执行成功", /已发货：/);
 
 // ---------- 6.5 执行失败与重试 ----------
 // 模拟通道几乎不会失败，这里直接往状态里塞一条失败动作，验证失败标签页和重试。
@@ -425,10 +440,24 @@ check(
   /可比同行的中位价是 ¥1,699\.00/.test(researchText),
 );
 check("结论挂着可以点回去的证据", (await page.locator('a[href*="goofish.com/item"]').count()) > 0);
-check("回访清单按上次观察时间列出", /回访清单/.test(researchText));
+check("热度监控板在研究台上", /热度监控/.test(researchText));
 check(
   "缺失的字段如实显示，没有假装抽到",
   /可比但没抽到价格|没抽到/.test(researchText),
+);
+
+// 全局监控间隔是用户可见的设置：保存后刷新仍应生效；已有采样的货在
+// 该间隔内必须保持不可重复采集，避免一次 UI 改动重新打开真实商详。
+const watchInterval = page.getByLabel("全局监控间隔（小时）");
+await watchInterval.fill("12");
+await watchInterval.blur();
+await checkToast("监控间隔可保存", /已设为每 12 小时采一次监控中的商品/);
+await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
+check("刷新后保留监控间隔", (await page.getByLabel("全局监控间隔（小时）").inputValue()) === "12");
+const watchedDetailButton = page.getByRole("button", { name: "12 小时内已采过" });
+check(
+  "监控间隔内不允许重复采集",
+  (await watchedDetailButton.count()) > 0 && (await watchedDetailButton.first().isDisabled()),
 );
 
 /** 打开导入弹窗，粘贴一份快照，返回这次导入的提示文案。 */
@@ -493,6 +522,17 @@ const missingImport = await importSnapshot({
   capturedAt,
   pageUrl: "https://www.goofish.com/item?id=900777",
   pageType: "detail",
+  // 真实商详响应会给出结构化标题；不能只靠可见文字，否则筛选器无法判断
+  // 它是不是本任务的 OLED 同款，测试也就观察不到“缺想要”的页面状态。
+  api: {
+    data: {
+      itemDO: {
+        itemId: "900777",
+        title: "Switch OLED 白色 成色九成新 无拆修",
+        soldPrice: 1699,
+      },
+    },
+  },
   visibleText: "Switch OLED 白色 成色九成新 无拆修",
 });
 check(
@@ -502,29 +542,38 @@ check(
 );
 
 await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
-const newRivalRow = page.locator("tbody tr").filter({ hasText: "900777" }).first();
+const newRivalRow = page
+  .locator("tbody tr")
+  .filter({ hasText: "Switch OLED 白色 成色九成新 无拆修" })
+  .first();
 check("没抽到的字段在表里标成缺失", (await newRivalRow.innerText()).includes("没抽到"));
 
 // 展开时间线，确认每条观察都带证据和抽取层级
 const firstRow = page.locator("tbody tr").filter({ hasText: "812345001" }).first();
 await clickUntil(
-  firstRow.getByRole("button", { name: "时间线" }),
+  firstRow.getByRole("button", { name: "文案" }),
   page.locator("text=页面接口").first(),
 );
 const timeline = await text();
 check("时间线标出每个数是哪一层抽的", /页面接口|内嵌 JSON|可见文字/.test(timeline));
 check("时间线区分商详与搜索", /商详/.test(timeline));
+check(
+  "展开文案后能收起",
+  (await page.getByRole("button", { name: "收起" }).count()) >= 1,
+);
 
-// 人工改对齐结论：改过之后不该再被关键词判定覆盖
-const uncertainRow = page.locator("tbody tr").filter({ hasText: "812345005" }).first();
-await uncertainRow.getByRole("button", { name: "不同款" }).click();
-await checkToast("可以人工改对齐结论", /已标记为「不同款」/);
+// 人工标成不同款会直接移出同行表，存疑也不进这张表
+const comparableRow = page.locator("tbody tr").filter({ hasText: "812345003" }).first();
+await comparableRow.getByRole("button", { name: "不同款" }).click();
+await checkToast("不同款会移出同行列表", /已移出同行列表/);
 await page.goto(`${BASE}/research`, { waitUntil: "networkidle" });
 check(
-  "人工标过的对齐结论标出来源",
-  (await page.locator("tbody tr").filter({ hasText: "812345005" }).first().innerText()).includes(
-    "人工",
-  ),
+  "不同款不再出现在同行表",
+  (await page.locator("tbody tr").filter({ hasText: "812345003" }).count()) === 0,
+);
+check(
+  "存疑种子也不会进同行表",
+  (await page.locator("tbody tr").filter({ hasText: "812345005" }).count()) === 0,
 );
 
 // ---------- 7.7 浏览器采集端：本机 API ----------
@@ -575,6 +624,9 @@ check(
     /记录 1 条观察/.test(collected.body.message),
   collected.body.message,
 );
+
+const pulseAfter = await fetch(`${BASE}/api/research/pulse`).then((r) => r.json());
+check("导入后研究台短戳会变", pulseAfter.ok && typeof pulseAfter.stamp === "string" && pulseAfter.stamp.length > 0);
 
 // 搜索页一次铺多张卡片，抽不到「想要」的如实报出来
 const bulk = await postSnapshot({
@@ -632,17 +684,22 @@ check("页面上有采集端配对信息", /浏览器采集端/.test(afterCollec
 // ---------- 7.8 采集端读页面的那段代码 ----------
 // 对着本地伪造的页面跑，不碰真实的闲鱼 —— 真站点上跑自动化正是这套设计要避免的事。
 // 拦掉请求本地应答，所以这里一个字节都不会发到 goofish.com。
-const DETAIL_FIXTURE = `<!doctype html><html lang="zh-CN"><body>
+const DETAIL_FIXTURE = `<!doctype html><html lang="zh-CN"><head>
+  <meta name="description" content="原盒全套，自用一年，功能正常，走闲鱼包邮。" />
+  <meta property="og:image" content="https://img.alicdn.com/bao/uploaded/i1/detail-cover.jpg" />
+</head><body>
   <h1>Nintendo Switch OLED 白色 主机 带塞尔达卡带</h1>
+  <img src="https://img.alicdn.com/bao/uploaded/i1/detail-cover.jpg" alt="cover" />
   <div class="price">¥1,699.00</div>
   <div class="meta">86人想要 · 包邮 · 九成新</div>
+  <p>原盒全套，自用一年，功能正常，走闲鱼包邮。</p>
 </body></html>`;
 
 const SEARCH_FIXTURE = `<!doctype html><html lang="zh-CN"><body>
   <div class="feed">
     <div class="card">
       <a href="https://www.goofish.com/item?id=700001">
-        <img alt="cover" />
+        <img src="https://img.alicdn.com/bao/uploaded/i1/card-700001.jpg" alt="cover" />
       </a>
       <div>Switch OLED 白色 带塞尔达王国之泪</div>
       <div>¥1,720</div>
@@ -650,7 +707,7 @@ const SEARCH_FIXTURE = `<!doctype html><html lang="zh-CN"><body>
     </div>
     <div class="card">
       <a href="https://www.goofish.com/item?id=700002">
-        <img alt="cover" />
+        <img src="https://img.alicdn.com/bao/uploaded/i1/card-700002.jpg" alt="cover" />
       </a>
       <div>Switch OLED 港版 单主机</div>
       <div>¥1,610</div>
@@ -688,6 +745,12 @@ check(
   JSON.stringify(detailSnapshot.snapshot?.dom),
 );
 check(
+  "采集端从商详页带上封面和正文",
+  detailSnapshot.snapshot?.dom?.imageUrls?.[0]?.includes("detail-cover.jpg") &&
+    /原盒全套/.test(detailSnapshot.snapshot?.dom?.description ?? ""),
+  JSON.stringify(detailSnapshot.snapshot?.dom),
+);
+check(
   "采集端带上可见文字当证据",
   /86人想要/.test(detailSnapshot.snapshot?.visibleText ?? ""),
 );
@@ -711,6 +774,11 @@ check(
     firstCard?.wants === 18 &&
     /Switch OLED/.test(firstCard?.title ?? ""),
   JSON.stringify(firstCard),
+);
+check(
+  "搜索卡片带上封面图",
+  firstCard?.imageUrls?.[0]?.includes("card-700001.jpg"),
+  JSON.stringify(firstCard?.imageUrls),
 );
 check(
   "卡片上没有「想要」就不给这个字段",

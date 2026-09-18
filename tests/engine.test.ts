@@ -11,6 +11,7 @@ import {
   shouldRunScheduledTick,
   toAction,
 } from "@/lib/agent/engine";
+import { MAX_RUNS } from "@/lib/domain/limits";
 import { createSeedState } from "@/lib/domain/seed";
 import type {
   ActionType,
@@ -144,8 +145,8 @@ describe("runTick", () => {
     state = createSeedState(NOW);
   });
 
-  it("自动执行免审批规则，其余进审批队列", () => {
-    const result = runTick(state, mockAdapter, NOW);
+  it("自动执行免审批规则，其余进审批队列", async () => {
+    const result = await runTick(state, mockAdapter, NOW);
 
     // 擦亮和零库存下架是免审批的
     expect(result.applied.map((a) => a.ruleKind).sort()).toEqual(
@@ -161,15 +162,15 @@ describe("runTick", () => {
     expect(result.failed).toEqual([]);
   });
 
-  it("自动执行真的改变了状态", () => {
-    runTick(state, mockAdapter, NOW);
+  it("自动执行真的改变了状态", async () => {
+    await runTick(state, mockAdapter, NOW);
     expect(state.listings.find((l) => l.id === "L008")!.status).toBe("delisted");
     expect(state.lastTickAt).toBe(new Date(NOW).toISOString());
   });
 
-  it("连续巡检不会对同一个对象重复动作", () => {
-    const first = runTick(state, mockAdapter, NOW);
-    const second = runTick(state, mockAdapter, NOW + 60_000);
+  it("连续巡检不会对同一个对象重复动作", async () => {
+    const first = await runTick(state, mockAdapter, NOW);
+    const second = await runTick(state, mockAdapter, NOW + 60_000);
 
     expect(first.queued.length).toBeGreaterThan(0);
     // 待审批的建议还堵在队列里，不会被再提一次
@@ -181,22 +182,22 @@ describe("runTick", () => {
     }
   });
 
-  it("擦亮的每轮上限会把剩下的留到下一轮", () => {
+  it("擦亮的每轮上限会把剩下的留到下一轮", async () => {
     const rule = state.rules.find((r) => r.kind === "refresh_listing")!;
     rule.params.maxPerRun = 1;
 
-    const first = runTick(state, mockAdapter, NOW);
+    const first = await runTick(state, mockAdapter, NOW);
     expect(first.applied.filter((a) => a.ruleKind === "refresh_listing")).toHaveLength(1);
 
-    const second = runTick(state, mockAdapter, NOW + 60_000);
+    const second = await runTick(state, mockAdapter, NOW + 60_000);
     expect(second.applied.filter((a) => a.ruleKind === "refresh_listing")).toHaveLength(1);
   });
 
-  it("低置信度的回复草稿即使规则免审批也会进队列", () => {
+  it("低置信度的回复草稿即使规则免审批也会进队列", async () => {
     const replyRule = state.rules.find((r) => r.kind === "auto_reply")!;
     replyRule.requiresApproval = false;
 
-    const result = runTick(state, mockAdapter, NOW);
+    const result = await runTick(state, mockAdapter, NOW);
     const queuedReplies = result.queued.filter((a) => a.ruleKind === "auto_reply");
     const appliedReplies = result.applied.filter((a) => a.ruleKind === "auto_reply");
 
@@ -235,8 +236,8 @@ describe("执行失败的处理", () => {
     state = createSeedState(NOW);
   });
 
-  it("自动执行失败的动作会带着原因留在队列里，而不是消失", () => {
-    const result = runTick(state, brokenAdapter("refresh_listing"), NOW);
+  it("自动执行失败的动作会带着原因留在队列里，而不是消失", async () => {
+    const result = await runTick(state, brokenAdapter("refresh_listing"), NOW);
 
     expect(result.failed.length).toBeGreaterThan(0);
     for (const action of result.failed) {
@@ -249,21 +250,21 @@ describe("执行失败的处理", () => {
     expect(result.applied.some((a) => a.ruleKind === "refresh_listing")).toBe(false);
   });
 
-  it("失败的动作不会被下一轮重复提案", () => {
-    runTick(state, brokenAdapter("refresh_listing"), NOW);
+  it("失败的动作不会被下一轮重复提案", async () => {
+    await runTick(state, brokenAdapter("refresh_listing"), NOW);
     const before = state.actions.filter((a) => a.status === "failed").length;
-    runTick(state, brokenAdapter("refresh_listing"), NOW + 60_000);
+    await runTick(state, brokenAdapter("refresh_listing"), NOW + 60_000);
     const after = state.actions.filter((a) => a.status === "failed").length;
     // 失败的商品这一轮仍然「没擦亮」，所以会被再提一次 —— 但同一个商品不会同时挂两条待审批
     expect(after).toBeGreaterThanOrEqual(before);
     expect(state.actions.filter((a) => a.status === "pending").length).toBeGreaterThan(0);
   });
 
-  it("重试成功后状态变成已执行，尝试次数累加", () => {
-    runTick(state, brokenAdapter("refresh_listing"), NOW);
+  it("重试成功后状态变成已执行，尝试次数累加", async () => {
+    await runTick(state, brokenAdapter("refresh_listing"), NOW);
     const failed = state.actions.find((a) => a.status === "failed")!;
 
-    const outcome = retryAction(state, failed, mockAdapter, NOW + 1000);
+    const outcome = await retryAction(state, failed, mockAdapter, NOW + 1000);
     expect(outcome.ok).toBe(true);
     expect(failed.status).toBe("applied");
     expect(failed.failureReason).toBeUndefined();
@@ -271,11 +272,11 @@ describe("执行失败的处理", () => {
     expect(failed.decidedBy).toBe("human");
   });
 
-  it("重试仍然失败会更新原因并继续累加次数", () => {
-    runTick(state, brokenAdapter("refresh_listing"), NOW);
+  it("重试仍然失败会更新原因并继续累加次数", async () => {
+    await runTick(state, brokenAdapter("refresh_listing"), NOW);
     const failed = state.actions.find((a) => a.status === "failed")!;
 
-    const outcome = retryAction(
+    const outcome = await retryAction(
       state,
       failed,
       brokenAdapter("refresh_listing", "还是不行"),
@@ -295,8 +296,8 @@ describe("巡检记录与定时巡检", () => {
     state = createSeedState(NOW);
   });
 
-  it("每轮巡检都会留下一条记录", () => {
-    runTick(state, mockAdapter, NOW, "scheduled");
+  it("每轮巡检都会留下一条记录", async () => {
+    await runTick(state, mockAdapter, NOW, "scheduled");
     expect(state.runs).toHaveLength(1);
     expect(state.runs[0]).toMatchObject({
       trigger: "scheduled",
@@ -305,20 +306,20 @@ describe("巡检记录与定时巡检", () => {
     expect(state.runs[0].applied).toBeGreaterThan(0);
     expect(state.runs[0].queued).toBeGreaterThan(0);
 
-    runTick(state, mockAdapter, NOW + 60_000, "manual");
+    await runTick(state, mockAdapter, NOW + 60_000, "manual");
     expect(state.runs).toHaveLength(2);
     // 最近的在最前面
     expect(state.runs[0].trigger).toBe("manual");
   });
 
-  it("巡检记录最多留 50 条", () => {
-    for (let i = 0; i < 60; i += 1) {
-      runTick(state, mockAdapter, NOW + i * 1000);
+  it("巡检记录最多留上限条数", async () => {
+    for (let i = 0; i < MAX_RUNS + 10; i += 1) {
+      await runTick(state, mockAdapter, NOW + i * 1000);
     }
-    expect(state.runs).toHaveLength(50);
+    expect(state.runs).toHaveLength(MAX_RUNS);
   });
 
-  it("没到间隔就不跑，到了才跑", () => {
+  it("没到间隔就不跑，到了才跑", async () => {
     state.settings.autoTickEnabled = true;
     state.settings.autoTickMinutes = 15;
 
@@ -326,7 +327,7 @@ describe("巡检记录与定时巡检", () => {
     expect(shouldRunScheduledTick(state, NOW + 14 * 60_000)).toBe(false);
     expect(shouldRunScheduledTick(state, NOW + 15 * 60_000)).toBe(true);
 
-    runTick(state, mockAdapter, NOW + 15 * 60_000, "scheduled");
+    await runTick(state, mockAdapter, NOW + 15 * 60_000, "scheduled");
     expect(shouldRunScheduledTick(state, NOW + 20 * 60_000)).toBe(false);
     expect(shouldRunScheduledTick(state, NOW + 30 * 60_000)).toBe(true);
   });
@@ -343,10 +344,10 @@ describe("巡检记录与定时巡检", () => {
     expect(shouldRunScheduledTick(state, NOW + 60_000)).toBe(false);
   });
 
-  it("下次巡检时间以上次巡检为基准", () => {
+  it("下次巡检时间以上次巡检为基准", async () => {
     state.settings.autoTickEnabled = true;
     state.settings.autoTickMinutes = 20;
-    runTick(state, mockAdapter, NOW, "manual");
+    await runTick(state, mockAdapter, NOW, "manual");
     expect(nextScheduledTickAt(state)).toBe(NOW + 20 * 60_000);
   });
 });
@@ -354,12 +355,12 @@ describe("巡检记录与定时巡检", () => {
 describe("applyActionWithEdits", () => {
   let state: AppState;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     state = createSeedState(NOW);
-    runTick(state, mockAdapter, NOW);
+    await runTick(state, mockAdapter, NOW);
   });
 
-  it("人工改价后执行，payload 会被更新", () => {
+  it("人工改价后执行，payload 会被更新", async () => {
     const action = state.actions.find(
       (a) => a.status === "pending" && a.payload.type === "adjust_price",
     )!;
@@ -367,7 +368,7 @@ describe("applyActionWithEdits", () => {
       (l) => listingIdOf(action) === l.id,
     )!;
 
-    const outcome = applyActionWithEdits(
+    const outcome = await applyActionWithEdits(
       state,
       action,
       { priceInput: String(listing.floorPriceCents / 100) },
@@ -380,7 +381,7 @@ describe("applyActionWithEdits", () => {
     expect(listing.priceCents).toBe(listing.floorPriceCents);
   });
 
-  it("被拒绝的编辑不会改坏队列里的建议", () => {
+  it("被拒绝的编辑不会改坏队列里的建议", async () => {
     const action = state.actions.find(
       (a) => a.status === "pending" && a.payload.type === "adjust_price",
     )!;
@@ -388,7 +389,7 @@ describe("applyActionWithEdits", () => {
     const listing = state.listings.find((l) => listingIdOf(action) === l.id)!;
     const priceBefore = listing.priceCents;
 
-    const rejected = applyActionWithEdits(
+    const rejected = await applyActionWithEdits(
       state,
       action,
       { priceInput: "1" },
@@ -400,15 +401,15 @@ describe("applyActionWithEdits", () => {
     expect(listing.priceCents).toBe(priceBefore);
 
     // 改坏之后原样通过，仍然应该成功
-    const retried = applyActionWithEdits(state, action, {}, mockAdapter, NOW);
+    const retried = await applyActionWithEdits(state, action, {}, mockAdapter, NOW);
     expect(retried.ok).toBe(true);
   });
 
-  it("空回复会被拒绝", () => {
+  it("空回复会被拒绝", async () => {
     const action = state.actions.find(
       (a) => a.status === "pending" && a.payload.type === "send_reply",
     )!;
-    const outcome = applyActionWithEdits(
+    const outcome = await applyActionWithEdits(
       state,
       action,
       { text: "   " },
@@ -418,11 +419,11 @@ describe("applyActionWithEdits", () => {
     expect(outcome.ok).toBe(false);
   });
 
-  it("发货单缺运单号会被拒绝", () => {
+  it("发货单缺运单号会被拒绝", async () => {
     const action = state.actions.find(
       (a) => a.status === "pending" && a.payload.type === "ship_order",
     )!;
-    const outcome = applyActionWithEdits(
+    const outcome = await applyActionWithEdits(
       state,
       action,
       { trackingNo: "" },

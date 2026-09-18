@@ -62,6 +62,44 @@ export function pickNumber(source: unknown, paths: string[]): number | undefined
   return undefined;
 }
 
+function asPositiveCount(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[^\d.-]/g, "");
+    if (!/\d/.test(cleaned)) return undefined;
+    const parsed = Number(cleaned);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+/**
+ * 字段搬家时按路径会落空。沿对象往下找第一个叫这个名字、且大于 0 的数。
+ */
+export function findNumberByKey(
+  source: unknown,
+  keyTest: RegExp,
+  depth = 0,
+): number | undefined {
+  if (depth > 8 || source === null || typeof source !== "object") return undefined;
+  if (Array.isArray(source)) {
+    for (const item of source.slice(0, 24)) {
+      const hit = findNumberByKey(item, keyTest, depth + 1);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
+  for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+    if (keyTest.test(key)) {
+      const count = asPositiveCount(value);
+      if (count !== undefined) return count;
+    }
+    const nested = findNumberByKey(value, keyTest, depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+}
+
 /** 列出一个对象上所有的叶子路径，给抓包排查用。 */
 export function describeShape(source: unknown, prefix = "", depth = 0): string[] {
   if (depth > 4 || source === null || typeof source !== "object") {

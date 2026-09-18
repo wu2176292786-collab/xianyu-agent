@@ -1,19 +1,25 @@
 # 闲鱼运营 Agent v1 · Xianyu Ops Agent
 
-给闲鱼卖家用的运营助手。它盯着你的商品、买家消息和订单，按你设定的规则把该做的事
-整理成**带理由、可审批**的建议：擦亮什么、降价多少、怎么回复买家、哪笔订单该发货了。
+给闲鱼卖家用的运营助手。它盯着你的商品和买家消息，按你设定的规则把该做的事
+整理成**带理由、可审批**的建议：擦亮什么、降价多少、怎么回复买家。
+
+产品使用方式、功能边界和技术构成见[产品功能与技术栈说明](docs/PRODUCT_OVERVIEW.md)；
+供 Agent 操作、维护和排障的单一入口是[功能与操作运行手册](docs/AGENT_OPERATIONS.md)。
 
 高风险的动作永远不会自动执行 —— Agent 负责起草，你负责点头。
+
+巡检循环基于 [pi-agent](https://github.com/earendil-works/pi)（`@earendil-works/pi-agent-core`）。
+店铺规则先算出候选动作，模型用 `survey_shop` / `select_proposals` 挑选；
+没配 `OPENAI_API_KEY` 时仍按规则巡检，审批队列和闲鱼通道不变。
 
 ![总览](docs/screenshots/dashboard.png)
 
 ## 这是什么
 
-- **总览**：曝光 / 成交额 / 待回复 / 待发货，14 天流量趋势，操作时间线
+- **总览**：曝光 / 成交额 / 待回复 / 在售，14 天流量趋势，操作时间线
 - **行动队列**：Agent 的每条建议都带着「为什么」，可以直接通过、改完再通过，或者忽略
 - **消息**：识别买家意图（议价 / 咨询细节 / 催发货 / 问库存 / 售后），一键起草回复
 - **商品**：擦亮、改价、下架；每个商品有**底价**，这是 Agent 的红线
-- **订单**：发货时效倒计时，超时订单会被主动备单
 - **自动化**：5 条规则的开关与参数，每条都能单独决定是否需要人工审批
 - **自动巡检**：不点按钮也会按间隔自己跑，跑完留下记录；执行失败的动作带着原因留在队列里等你重试
 - **通道与安全**：读写通道分开配置，支持演练模式、限流、急停和风控自动暂停
@@ -82,6 +88,7 @@ HMR 连接当跨源请求拦掉，页面会停在「渲染出来了但点不动�
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini                     # 可选
 OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
+OPENAI_VISION_MODEL=                         # 可选。留空则同行筛选不看图
 ```
 
 任何兼容 OpenAI 协议的网关都能直接用，改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL` 即可
@@ -120,7 +127,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
 | --- | --- | --- |
 | 本地模拟 | 改本地数据，并模拟平台反应（擦亮带来曝光回升、发货扣库存） | 演示和开发，默认 |
 | 演练 | 只记录「本来要干什么」，一个字段都不改 | 接真实账号之前，先看清楚 Agent 到底想做哪些事 |
-| 真实写入 | —— | 通道还没实现，选了会被明确拒绝 |
+| 真实写入 | 回复走闲鱼网页 IM（令牌 + WebSocket）。擦亮 / 改价 / 下架 / 发货还没接到接口，执行会被明确拒绝 | 已经同步过真实会话、确认要发出去时 |
 
 ### 四道安全阀
 
@@ -138,9 +145,14 @@ OPENAI_BASE_URL=https://api.openai.com/v1    # 可选
 从平台同步进来的新商品只有挂牌价，底价是按九折估的，会标成「底价待确认」。
 在你亲自确认之前，自动降价规则会绕开它 —— 拿一个猜出来的底价去降价，等于没有底价。
 
-### 真实读通道（v1.3，进行中）
+### 真实读通道与私信写入
 
-**写通道仍然没有真实实现**，选「真实写入」会被明确拒绝。这一版做的是**只读**接入。
+读通道拉商品和会话。写通道选「真实写入」之后，**回复会发到闲鱼**：先调
+`mtop.taobao.idlemessage.pc.login.token` 换 IM 令牌，再走
+`wss://wss-goofish.dingtalk.com/` 的 `/r/MessageSend/sendByReceiverScope`
+（协议对齐 [XianYuApis](https://github.com/cv-cat/XianYuApis)）。
+
+擦亮、改价、下架、发货那个项目也没有对应接口，这里不会猜一个 MTOP 名字去改你的商品。
 
 闲鱼网页版走的是淘系的 MTOP 网关。传输层、签名、登录态、重试和风控识别都已经实现，
 协议细节是对着真实网关探出来的，不是猜的：
@@ -223,7 +235,7 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 | `mtop.taobao.idlemessage.pc.session.sync` | 3.0 | **会话列表**（默认使用） |
 | `mtop.taobao.idlemessage.pc.message.sync` | 1.0 | 某个会话里的历史消息 |
 | `mtop.taobao.idle.pc.detail` | 1.0 | 商品详情 |
-| `mtop.taobao.idlemessage.pc.login.token` | 1.0 | 私信令牌（WebSocket 用） |
+| `mtop.taobao.idlemessage.pc.login.token` | 1.0 | 私信令牌（真实回复用） |
 | `mtop.idle.web.user.page.head` / `.nav` | 1.0 | 用户主页 / 导航 |
 | `mtop.idle.web.trade.bought.list` | 1.0 | **买到的**订单（不是卖出的） |
 | `mtop.taobao.idle.trade.user.adjust.price` | 1.0 | 订单改价（写操作，未接入） |
@@ -235,8 +247,12 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 销售单。所以没配就是没配 —— 与其硬编码一个猜的名字让它在运行时莫名其妙地失败，
 不如明确地说「没配」。没配的部分同步时会保留本地数据，不会清空。
 
-会话列表只给「最后一条消息」的摘要，所以同步进来的会话里就只有那一条 ——
-**不假装拿到了完整聊天记录**。完整对话要另外调 `message.sync`，还没接。
+会话列表只给「最后一条消息」的摘要，而且返回顺序不是严格按最近活跃。
+同步时按最后一条时间倒序，只给**最近还在聊的会话**补 `message.sync` 历史
+（180 天内、最多 15 个），并用商品详情接口给对不上库存的会话补标题。
+超过 14 天的「最后一条是买家」不再标成待回复，避免把几年前的对话顶到最前面。
+会话谈的经常不是当前在架的货，标题挂在会话上，不写进本店商品列表。
+官方通知（卖家小助手、闲鱼精选、交易消息）仍然不收，避免 Agent 给系统账号起草回复。
 
 #### 实测记下来的坑
 
@@ -245,6 +261,8 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 | 商品列表必填参数 | `userId`（= cookie 里的 `unb`）+ `pageNumber` + `pageSize`，少一个是 `FAIL_BIZ_BAD_REQUEST` |
 | 每页上限 | `pageSize` 填 40 被拒（最大可查看商品数超限），20 可以 |
 | 会话列表必填参数 | 只认 `fetchNum`，`sessionTypes` 给不给都一样 |
+| 历史消息必填参数 | `req` 必须是**字符串化 JSON**：`{sessionId,start,fetchs,type}`。传对象就是「缺少业务参数 req」 |
+| 会话商品标题 | `itemInfo` 只有 id / 主图，标题要另查 `idle.pc.detail` |
 | `ownerInfo` 不一定是我 | 有的会话里自己在 `userInfo` 那边，对方只能靠「userId ≠ unb」认 |
 | 混着系统会话 | `sessionType` 23 / 25 / 62 是官方通知、物流、活动，只收 `1`（单聊） |
 | 列表不给热度数据 | 浏览 / 想要 / 库存只有详情接口有，只对**在售**商品逐件补，且有上限 |
@@ -291,17 +309,15 @@ npm run xianyu:probe -- --call mtop.xxx   # 带凭证真的调一次，打印返
 
 ### 数据只有一个入口：你正常浏览时采集
 
-服务器**不会拿你的登录态去轮询别人的商详** —— 那是爬站，会把账号送进风控。
-所以同行数据只能这样进来：你在闲鱼正常浏览，采集当前页面上已经画出来的内容，
-本机解析入库。
-
-由此有一个必须接受的事实：**时间线的密度等于你回访的密度。** 所以「监测」在这里
-被定义成一份**回访清单**，而不是爬虫 —— 打开页面的动作由你做。
+搜索结果页只有卡片，**浏览量在商品详情页**。导入搜索页之后，会按商品链接去商详补想要和浏览；
+一件一件来，撞风控立刻停。盯住的货才会按天再采，用来和昨天对比。
+抽不到的字段如实留空，绝不写成 0。
 
 ### 采集端：一个按钮，不用手动粘贴
 
 `tools/xianyu-collector` 是配套的 Chrome 扩展：在闲鱼的商品详情页或搜索结果页上
-点一下，当前页就进研究里了。装法看
+点一下：搜索页会在当前标签里真点「下一页」、按你在选品研究里设定的页数连采；商详只采这一页。
+已经打开的 `/research` 会自己刷新，不用再手动 F5。装法看
 [它的 README](tools/xianyu-collector/README.md)，三步：
 
 ```bash
@@ -311,15 +327,18 @@ npm run dev                                  # 1. 应用跑起来
 ```
 
 扩展做的事只有旁听：记下页面**自己已经发出并拿回来**的响应、读页面内嵌的初始 JSON、
-读可见的文字。**不预取、不轮询、不翻页**，不改请求也不碰 cookie，只 POST 到你自己填的
-那个 `localhost` 地址。
+读可见的文字。**不预取、不轮询、不自己发闲鱼接口**；搜索页的翻页是点页面上的「下一页」，
+不改请求也不碰 cookie，只 POST 到你自己填的那个 `localhost` 地址。
 
 采集密钥是因为 `localhost` 对任何网页都是可达的 —— 没有它，你随便打开的某个网站也能
 往你的研究里塞脏数据。它**不是**平台凭证：既不能登录闲鱼，也动不了你的商品。
 想换就在界面上点「换一把密钥」。
 
-搜索结果页点一下会把当页所有卡片一次性加进来，适合开局批量铺同行；之后要盯的那几件
-还是得进商详页点，因为趋势只按商详对商详算。
+搜索结果页点一下会按设定页数连翻、把卡片加进来，适合开局批量铺同行；之后要盯的那几件
+还是得进商详页点，因为趋势只按商详对商详算。商详页再点一次还会补上封面图和正文。
+
+研究台里每件同行可以一键复制/导出商品文案，也可以用已配置的模型做一次润色。
+润色稿单独存，原文不动；模型改了价格数字会被弃用。
 
 ### 快照格式
 
@@ -332,7 +351,7 @@ npm run dev                                  # 1. 应用跑起来
   "pageType": "detail",
   "api":       { "data": { "itemDO": { "itemId": "812345001", "wantCnt": 97 } } },
   "hydration": { },
-  "dom":       { "itemId": "812345001", "wants": 97, "price": 1699 },
+  "dom":       { "itemId": "812345001", "wants": 97, "price": 1699, "imageUrls": ["https://img.alicdn.com/…"], "description": "原盒全套" },
   "visibleText": "97人想要 · 包邮 · 九成新"
 }
 ```
@@ -386,7 +405,7 @@ npm run dev                                  # 1. 应用跑起来
 从里面读出来的。每一条都用 `npm run xianyu:probe` 对着真实网关验过存在性，没有照抄。
 
 **私信的实时收发走的不是 HTTP**，而是钉钉那套 WebSocket（`wss://wss-goofish.dingtalk.com`），
-消息体是 base64 + Protobuf。这一版只用 `session.sync` 读会话列表快照；实时收发还没接。
+消息体是 base64 + Protobuf。这一版用 HTTP 的 `session.sync` + `message.sync` 拉会话和历史；实时收发还没接。
 
 ### 接真实写通道还要做什么
 
@@ -397,7 +416,7 @@ npm run dev                                  # 1. 应用跑起来
 
 ```bash
 npm run dev         # 开发服务器（端口 43117）
-npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析、选品研究，197 个用例
+npm run test        # vitest：规则引擎、回复起草、调度、安全阀、同步合并、MTOP 协议、登录态解析、选品研究
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run check       # 上面三件一起跑
@@ -406,7 +425,7 @@ npm run test:e2e    # 浏览器冒烟测试（需要先起服务，见下）
 ```
 
 `npm run test:e2e` 用 `playwright-core` 驱动本机已装的 Chrome，把审批、回复、擦亮、
-发货、规则开关、选品研究、采集端 API 和移动端布局跑一遍（99 项）。它会先点一次
+发货、规则开关、选品研究、采集端 API 和移动端布局跑一遍。它会先点一次
 「重置示例数据」，所以可以重复运行 —— 跑之前会把 `.data/state.json` 抄一份，
 跑完（哪怕中途崩了）再放回去，**不会把你同步来的真实数据冲掉**：
 
@@ -429,12 +448,11 @@ src/
 ├── instrumentation.ts      服务端启动时把后台巡检跑起来
 ├── app/                    页面（Server Components）与 Server Actions
 │   ├── actions.ts          所有写操作的入口
-│   ├── api/research/       采集端投快照的本机接口（密钥校验）
+│   ├── api/research/       采集端投快照、研究台刷新短戳（密钥校验）
 │   ├── page.tsx            总览
 │   ├── queue/              行动队列
 │   ├── inbox/              消息
 │   ├── listings/           商品
-│   ├── orders/             订单
 │   ├── research/           选品研究：同行「想要」观察
 │   └── automations/        自动化规则与店铺设置
 ├── components/             UI 组件（shadcn/ui + 业务组件）
@@ -444,7 +462,7 @@ src/
     │   ├── guard.ts        安全阀：急停 / 演练 / 限流 / 风控暂停
     │   ├── mock.ts         模拟写通道
     │   ├── mock-reader.ts  模拟读通道
-    │   └── live/           真实读通道
+    │   └── live/           真实读通道 + 私信写入
     │       ├── mtop.ts         签名、错误码分类、重试决策
     │       ├── login-state.ts  登录态解析与存储（cookie + 请求头）
     │       ├── credentials.ts  凭证检查与脱敏
@@ -454,7 +472,7 @@ src/
     ├── research/           选品研究（和本店商品完全分开）
     │   ├── snapshot.ts     页面快照解析：三层抽取
     │   ├── record.ts       按 itemId 追加观察、短时去重、规格对齐
-    │   ├── analysis.ts     想要趋势、价格带、回访清单、带证据的结论
+    │   ├── analysis.ts     想要/浏览趋势、价格带、热度监控、带证据的结论
     │   └── collector.ts    采集端配对密钥与请求校验
     ├── agent/
     │   ├── engine.ts       规则引擎：状态 + 时间 → 建议
@@ -465,7 +483,7 @@ src/
     │   └── llm.ts          可选的 LLM 润色
     └── store.ts            JSON 文件存储
 tests/                      vitest 单元测试 + e2e.mjs 浏览器冒烟测试
-tools/xianyu-collector/     浏览器采集端（Chrome 扩展，只读当前页）
+tools/xianyu-collector/     浏览器采集端（Chrome 扩展，搜索页按设定页数连翻）
 scripts/screenshots.mjs     重新生成 README 截图
 scripts/xianyu-probe.mjs    接口名探测与排查
 scripts/xianyu-login.mjs    导入 / 验证 / 清除登录态
@@ -481,8 +499,7 @@ docs/plans/                 执行计划
 3. 执行失败的动作**不会被悄悄丢掉**，会带着失败原因和尝试次数留在队列里，
    可以原样重试或者改完再试；
 4. 所有写操作都必须穿过 `GuardedAdapter`，急停、限流、风控暂停一个都绕不过去；
-5. 同行数据只能由你在正常浏览时采集进来，**服务器不会主动去请求别人的商详**；
-   抽不到的字段如实留空，绝不写成 0。
+5. 同行热度按商品链接去商详补，限速、撞风控立刻停；抽不到的字段如实留空，绝不写成 0。
 
 ### 时间一律按北京时间显示
 

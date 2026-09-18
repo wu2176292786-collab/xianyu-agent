@@ -1,5 +1,64 @@
+import { FRESH_REPLY_WINDOW_MS, lastActivityAt } from "@/lib/agent/reply";
 import { DEMO_SHOP_NAME } from "@/lib/domain/seed";
-import type { AppState, Listing, PlatformSnapshot } from "@/lib/domain/types";
+import type { AppState, DailyMetric, Listing, PlatformSnapshot } from "@/lib/domain/types";
+import { shopDay } from "@/lib/format";
+
+/** 在售商品里已经同步到的浏览 / 想要。没拿到热度的不计入，避免把占位 0 当成没人看。 */
+export function shopHeatFromListings(listings: Listing[]) {
+  const known = listings.filter((listing) => listing.status === "on_sale" && !listing.metricsUnknown);
+  return {
+    known: known.length,
+    views: known.reduce((sum, listing) => sum + listing.views7d, 0),
+    wants: known.reduce((sum, listing) => sum + listing.wants, 0),
+    inquiries: known.reduce((sum, listing) => sum + listing.inquiries7d, 0),
+  };
+}
+
+/** 真实同步后记下今天的店铺曝光快照，总览才有数可加。 */
+export function recordShopHeat(state: AppState, now: number): DailyMetric | undefined {
+  const heat = shopHeatFromListings(state.listings);
+  if (heat.known === 0) return undefined;
+  const date = shopDay(now);
+  const existing = state.metrics.find((row) => row.date === date);
+  const next: DailyMetric = {
+    date,
+    views: heat.views,
+    inquiries: heat.inquiries,
+    orders: existing?.orders ?? 0,
+    gmvCents: existing?.gmvCents ?? 0,
+  };
+  if (existing) Object.assign(existing, next);
+  else state.metrics.push(next);
+  state.metrics.sort((a, b) => a.date.localeCompare(b.date));
+  return next;
+}
+
+/** 换号时清掉只属于上一账号的店内数据。规则、研究和通道设置留着。 */
+export function resetAccountBoundData(state: AppState): void {
+  state.listings = [];
+  state.conversations = [];
+  state.orders = [];
+  state.actions = [];
+  state.metrics = [];
+}
+
+/**
+ * 记下当前闲鱼账号。换了人就清空上一号的商品 / 会话 / 订单。
+ * 返回是不是刚换过号。
+ */
+export function adoptAccount(
+  state: AppState,
+  accountUserId: string,
+  shopName?: string,
+): boolean {
+  const incoming = accountUserId.trim();
+  if (!incoming || incoming === state.settings.accountUserId) return false;
+
+  resetAccountBoundData(state);
+  state.settings.accountUserId = incoming;
+  if (shopName?.trim()) state.settings.shopName = shopName.trim();
+  return true;
+}
 
 export interface MergeSummary {
   newListings: number;
@@ -42,6 +101,10 @@ export function mergeSnapshot(
     needsFloorPrice: 0,
   };
 
+  const switched = snapshot.accountUserId
+    ? adoptAccount(state, snapshot.accountUserId, snapshot.shopName)
+    : false;
+
   const localListings = new Map(state.listings.map((l) => [l.id, l] as const));
   const mergedListings: Listing[] = snapshot.listings.map((remote) => {
     const local = localListings.get(remote.id);
@@ -68,6 +131,7 @@ export function mergeSnapshot(
       floorPriceCents: local.floorPriceCents,
       floorConfirmed: local.floorConfirmed,
       costCents: local.costCents,
+      copy: remote.copy ?? local.copy,
       // 这次没拿到热度数据时，保留上一次拿到的，别用占位的 0 把它冲掉
       ...(remote.metricsUnknown
         ? {
@@ -80,10 +144,13 @@ export function mergeSnapshot(
     };
   });
 
-  // 平台上已经没有、但本地还留着的商品保留下来，避免一次抓取失败就丢数据
-  const remoteIds = new Set(snapshot.listings.map((l) => l.id));
-  for (const local of state.listings) {
-    if (!remoteIds.has(local.id)) mergedListings.push(local);
+  // 同一账号：平台上暂时没返回的商品留着，避免一次抓取失败就丢数据。
+  // 换号：只收新账号的，绝不把上一号的货拼进来。
+  if (!switched) {
+    const remoteIds = new Set(snapshot.listings.map((l) => l.id));
+    for (const local of state.listings) {
+      if (!remoteIds.has(local.id)) mergedListings.push(local);
+    }
   }
   state.listings = mergedListings;
   summary.needsFloorPrice = state.listings.filter(
@@ -99,17 +166,74 @@ export function mergeSnapshot(
       continue;
     }
 
+    if (remote.listingId) local.listingId = remote.listingId;
+    if (remote.listingTitle) local.listingTitle = remote.listingTitle;
+    if (remote.listingPriceCents !== undefined) local.listingPriceCents = remote.listingPriceCents;
+    if (remote.buyerName && remote.buyerName !== "买家") local.buyerName = remote.buyerName;
+    if (remote.buyerId) local.buyerId = remote.buyerId;
+
+    // 会话列表那条 `${id}-last` 只是摘要。历史消息进来之后要丢掉，
+    // 否则同一句话会以两个 id 出现两次。
+    const remoteHasHistory = remote.messages.some((message) => !message.id.endsWith("-last"));
+    if (remoteHasHistory) {
+      local.messages = local.messages.filter((message) => !message.id.endsWith("-last"));
+    }
+
     const known = new Set(local.messages.map((m) => m.id));
-    const incoming = remote.messages.filter((m) => !known.has(m.id));
+    const incoming = remote.messages.filter(
+      (m) => !known.has(m.id) && !(remoteHasHistory && m.id.endsWith("-last")),
+    );
     if (incoming.length > 0) {
       local.messages.push(...incoming);
       local.messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
       summary.newMessages += incoming.length;
-      // 买家又说话了，会话重新变成待回复
-      if (local.messages.at(-1)?.author === "buyer" && local.status !== "closed") {
-        local.status = "needs_reply";
+    }
+
+    // 会话列表带的是「当前最后一条」。id 固定是 `${会话}-last`，
+    // 最新一条变了时 id 不变，只换文本和时间，必须覆盖。
+    // 历史页没翻到最新一条时，也要把这条更新的摘要合进来。
+    const remoteLast = remote.messages.at(-1);
+    const localLast = local.messages.at(-1);
+    if (remoteLast && localLast) {
+      const sameId = local.messages.findIndex((message) => message.id === remoteLast.id);
+      if (sameId >= 0) {
+        const existing = local.messages[sameId]!;
+        if (existing.text !== remoteLast.text || existing.createdAt !== remoteLast.createdAt) {
+          local.messages[sameId] = { ...remoteLast };
+          local.messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+          summary.newMessages += 1;
+        }
+      } else if (Date.parse(remoteLast.createdAt) > Date.parse(localLast.createdAt)) {
+        if (localLast.id.endsWith("-last")) {
+          local.messages[local.messages.length - 1] = { ...remoteLast };
+        } else {
+          local.messages.push({ ...remoteLast });
+        }
+        local.messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+        summary.newMessages += 1;
       }
     }
+
+    if (local.status !== "closed") {
+      const last = local.messages.at(-1);
+      local.status =
+        last?.author === "buyer" && now - lastActivityAt(local) <= FRESH_REPLY_WINDOW_MS
+          ? "needs_reply"
+          : "awaiting_buyer";
+    }
+  }
+
+  // IM 收件箱是当前真人会话。只剩 `${id}-last` 摘要的旧会话丢掉，
+  // 免得消息页一直显示自己账号的最后一句。
+  const remoteHasHistory = snapshot.conversations.some((conversation) =>
+    conversation.messages.some((message) => !message.id.endsWith("-last")),
+  );
+  if (remoteHasHistory) {
+    const keep = new Set(snapshot.conversations.map((conversation) => conversation.id));
+    state.conversations = state.conversations.filter((conversation) => {
+      if (keep.has(conversation.id)) return true;
+      return conversation.messages.some((message) => !message.id.endsWith("-last"));
+    });
   }
 
   for (const remote of snapshot.orders) {
@@ -130,8 +254,15 @@ export function mergeSnapshot(
    * 一律不覆盖的话，接上真实账号后侧栏还挂着「老陈的数码小铺」，容易
    * 让人以为同步错了账号。
    */
-  if (snapshot.shopName?.trim() && state.settings.shopName === DEMO_SHOP_NAME) {
+  if (
+    snapshot.shopName?.trim() &&
+    (switched || state.settings.shopName === DEMO_SHOP_NAME)
+  ) {
     state.settings.shopName = snapshot.shopName.trim();
+  }
+
+  if (state.channel.read === "live") {
+    recordShopHeat(state, now);
   }
 
   state.lastSyncAt = new Date(now).toISOString();

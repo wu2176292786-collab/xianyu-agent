@@ -6,13 +6,12 @@ const MINUTE = 60_000;
 export const WRITE_MODE_LABEL: Record<AppState["channel"]["write"], string> = {
   mock: "本地模拟",
   dry_run: "演练（只记录不执行）",
-  live: "真实写入（未接入）",
+  live: "真实写入",
 };
 
 export const READ_CHANNEL_LABEL: Record<AppState["channel"]["read"], string> = {
   mock: "本地模拟数据",
-  // 只读：能拉商品和会话，一个字都写不回去
-  live: "真实闲鱼账号（只读）",
+  live: "真实闲鱼账号",
 };
 
 export interface WriteBudget {
@@ -36,9 +35,6 @@ function rateLimited(state: AppState): boolean {
 export function checkWriteBudget(state: AppState, now: number): WriteBudget {
   if (state.safety.paused) {
     return { ok: false, reason: `已急停：${state.safety.pausedReason ?? "未说明原因"}` };
-  }
-  if (state.channel.write === "live") {
-    return { ok: false, reason: "真实写入通道还没实现，请先用演练模式。" };
   }
   if (!rateLimited(state)) return { ok: true };
 
@@ -112,7 +108,7 @@ export class GuardedAdapter implements XianyuAdapter {
     this.isMock = inner.isMock;
   }
 
-  refreshListing(state: AppState, listingId: string, now: number): AdapterResult {
+  refreshListing(state: AppState, listingId: string, now: number): Promise<AdapterResult> {
     return this.run(state, now, `擦亮商品 ${listingId}`, () =>
       this.inner.refreshListing(state, listingId, now),
     );
@@ -123,7 +119,7 @@ export class GuardedAdapter implements XianyuAdapter {
     listingId: string,
     toCents: number,
     now: number,
-  ): AdapterResult {
+  ): Promise<AdapterResult> {
     return this.run(
       state,
       now,
@@ -132,7 +128,7 @@ export class GuardedAdapter implements XianyuAdapter {
     );
   }
 
-  delistListing(state: AppState, listingId: string, now: number): AdapterResult {
+  delistListing(state: AppState, listingId: string, now: number): Promise<AdapterResult> {
     return this.run(state, now, `下架商品 ${listingId}`, () =>
       this.inner.delistListing(state, listingId, now),
     );
@@ -143,7 +139,7 @@ export class GuardedAdapter implements XianyuAdapter {
     conversationId: string,
     text: string,
     now: number,
-  ): AdapterResult {
+  ): Promise<AdapterResult> {
     return this.run(state, now, `给会话 ${conversationId} 发一条回复`, () =>
       this.inner.sendMessage(state, conversationId, text, now),
     );
@@ -155,18 +151,18 @@ export class GuardedAdapter implements XianyuAdapter {
     carrier: string,
     trackingNo: string,
     now: number,
-  ): AdapterResult {
+  ): Promise<AdapterResult> {
     return this.run(state, now, `发货订单 ${orderId}（${carrier} ${trackingNo}）`, () =>
       this.inner.shipOrder(state, orderId, carrier, trackingNo, now),
     );
   }
 
-  private run(
+  private async run(
     state: AppState,
     now: number,
     label: string,
-    execute: () => AdapterResult,
-  ): AdapterResult {
+    execute: () => AdapterResult | Promise<AdapterResult>,
+  ): Promise<AdapterResult> {
     const budget = checkWriteBudget(state, now);
     if (!budget.ok) {
       return { ok: false, message: budget.reason ?? "写操作被拒绝。" };
@@ -178,7 +174,7 @@ export class GuardedAdapter implements XianyuAdapter {
       return { ok: true, message: `[演练] ${label}（实际未执行）`, dryRun: true };
     }
 
-    const result = execute();
+    const result = await execute();
     recordWrite(state, now);
 
     if (result.riskControl) {

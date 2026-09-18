@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
@@ -33,14 +34,14 @@ import { cn } from "@/lib/utils";
 const WRITE_MODES: Array<{ value: WriteMode; hint: string }> = [
   { value: "mock", hint: "改本地数据，模拟平台反应。演示和开发用。" },
   { value: "dry_run", hint: "只记录「本来要干什么」，什么都不改。接真实账号前先跑这个。" },
-  { value: "live", hint: "真实写入。通道还没实现，选了会被拒绝。" },
+  { value: "live", hint: "回复会发到闲鱼。擦亮 / 改价 / 下架 / 发货还没接到接口。" },
 ];
 
 const READ_CHANNELS: Array<{ value: ReadChannel; hint: string }> = [
   { value: "mock", hint: "用本地示例数据，每次同步会造一点平台侧的变化。" },
   {
     value: "live",
-    hint: "拉你真实店铺的商品和会话。先跑 npm run xianyu:login 导入登录态。",
+    hint: "拉你真实店铺的商品和会话。先到「账号登录」导入登录态。",
   },
 ];
 
@@ -190,7 +191,11 @@ export function ChannelCard({
                   消息接口：{live.endpoints.conversations ?? "未配置（同步时会保留本地会话）"}
                 </p>
                 <p className="text-muted-foreground">
-                  用 <code className="font-mono">npm run xianyu:probe</code> 验证接口名和登录态。
+                  登录态到{" "}
+                  <Link href="/automations/login" className="underline underline-offset-2">
+                    账号登录
+                  </Link>{" "}
+                  里导入和验证。
                 </p>
               </div>
             ) : null}

@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -10,12 +10,34 @@ import path from "node:path";
  * 可以用「Xianyu Login State Extractor」这个 Chrome 扩展一键导出，
  * 也可以自己从 DevTools 里抄。
  */
+/**
+ * 导出登录态那台机器的设备特征。
+ *
+ * 用浏览器打开商详时要照着它重建 context。cookie 是在用户真机上签发的，
+ * 却拿到一个屏幕尺寸、时区、触摸点数都对不上的壳子里去用，
+ * 这种不一致和换 User-Agent 一样是风控的典型触发条件。
+ */
+export interface LoginFingerprint {
+  platform?: string;
+  locale?: string;
+  languages?: string[];
+  timeZone?: string;
+  screen?: { width: number; height: number };
+  devicePixelRatio?: number;
+  colorDepth?: number;
+  maxTouchPoints?: number;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+}
+
 export interface LoginState {
   cookie: string;
   /** 只保留我们会原样带上的那几个头，全部小写 */
   headers: Record<string, string>;
   /** 导出时间，用来提示登录态有多旧 */
   capturedAt?: string;
+  /** 导出那台机器的设备特征，只有扩展导出的 JSON 才有 */
+  fingerprint?: LoginFingerprint;
 }
 
 /**
@@ -123,6 +145,81 @@ function headersFromUnknown(source: Record<string, unknown>): Record<string, str
   return headers;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function positiveInt(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function nonNegativeInt(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : undefined;
+}
+
+function trimmedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * 捞设备特征。
+ *
+ * 两种来源：扩展导出的原始 `env`，以及我们自己存盘后再读回来的 `fingerprint`。
+ * 存盘走的是同一个解析函数，不认后者的话，落一次盘指纹就没了。
+ *
+ * 字段名各版本不一样（`intl.timeZone` / 顶层 `timezone`），逐个候选试；
+ * 认不出来就留空 —— 宁可不还原，也不能编一个假的塞进去。
+ */
+export function fingerprintFromUnknown(
+  source: Record<string, unknown>,
+): LoginFingerprint | undefined {
+  const env = asRecord(source.env ?? source.environment ?? source.browser);
+  const navigator = asRecord(env.navigator ?? env.nav);
+  const screen = asRecord(env.screen);
+  const intl = asRecord(env.intl);
+  const saved = asRecord(source.fingerprint);
+  const savedScreen = asRecord(saved.screen);
+
+  const rawLanguages = navigator.languages ?? saved.languages;
+  const languages = Array.isArray(rawLanguages)
+    ? rawLanguages.filter((item): item is string => typeof item === "string")
+    : undefined;
+
+  const width = positiveInt(screen.width ?? savedScreen.width);
+  const height = positiveInt(screen.height ?? savedScreen.height);
+
+  const fingerprint: LoginFingerprint = {
+    platform: trimmedString(navigator.platform ?? env.platform ?? saved.platform),
+    locale: trimmedString(intl.locale ?? navigator.language ?? env.locale ?? saved.locale),
+    languages: languages && languages.length > 0 ? languages : undefined,
+    timeZone: trimmedString(
+      intl.timeZone ?? env.timeZone ?? env.timezone ?? saved.timeZone,
+    ),
+    screen: width !== undefined && height !== undefined ? { width, height } : undefined,
+    devicePixelRatio: positiveNumber(
+      screen.devicePixelRatio ?? env.devicePixelRatio ?? saved.devicePixelRatio,
+    ),
+    colorDepth: positiveInt(screen.colorDepth ?? saved.colorDepth),
+    maxTouchPoints: nonNegativeInt(navigator.maxTouchPoints ?? saved.maxTouchPoints),
+    hardwareConcurrency: positiveInt(
+      navigator.hardwareConcurrency ?? saved.hardwareConcurrency,
+    ),
+    deviceMemory: positiveNumber(navigator.deviceMemory ?? saved.deviceMemory),
+  };
+
+  const filled = Object.values(fingerprint).some((value) => value !== undefined);
+  return filled ? fingerprint : undefined;
+}
+
 /**
  * 尽量把各种导出格式解析成统一的登录态。
  *
@@ -166,7 +263,12 @@ export function parseLoginState(input: string | Record<string, unknown>): LoginS
           ? new Date(source.timestamp).toISOString()
           : undefined;
 
-  return { cookie, headers: headersFromUnknown(source), capturedAt };
+  return {
+    cookie,
+    headers: headersFromUnknown(source),
+    capturedAt,
+    fingerprint: fingerprintFromUnknown(source),
+  };
 }
 
 /** 落盘，权限 600。目录 `.secrets/` 已经在 .gitignore 里。 */
@@ -189,8 +291,44 @@ export async function readLoginStateFile(): Promise<LoginState | null> {
   }
 }
 
+export async function clearLoginState(): Promise<void> {
+  await rm(CREDENTIALS_FILE, { force: true });
+}
+
+export function resolveLoginOrigin(input: {
+  envCookie?: string;
+  hasFile: boolean;
+}): "env" | "file" | "none" {
+  const env = input.envCookie?.trim();
+  if (env && parseLoginState(env)) return "env";
+  return input.hasFile ? "file" : "none";
+}
+
+export async function loginStateOrigin(): Promise<"env" | "file" | "none"> {
+  return resolveLoginOrigin({
+    envCookie: process.env.XIANYU_COOKIE,
+    hasFile: Boolean(await readLoginStateFile()),
+  });
+}
+
 export function loginStateFilePath(): string {
   return CREDENTIALS_FILE;
+}
+
+/**
+ * 登录态的版本戳，用户重新导一次就会变。
+ *
+ * 撞风控时记下当时的戳，之后发现戳变了就说明用户换了新的登录态，
+ * 可以提前解除暂停，不用干等满六小时。值本身不含任何凭证。
+ */
+export async function loginStateStamp(): Promise<string | undefined> {
+  if (process.env.XIANYU_COOKIE?.trim()) return "env";
+  try {
+    const info = await stat(CREDENTIALS_FILE);
+    return `file:${Math.round(info.mtimeMs)}`;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -220,6 +358,7 @@ export function describeLoginState(state: LoginState | null): string {
   return [
     `${names.length} 个 cookie 字段`,
     headerNames.length > 0 ? `${headerNames.length} 个请求头（${headerNames.join(", ")}）` : "没有请求头",
+    state.fingerprint ? "带设备指纹" : "",
     state.capturedAt ? `导出于 ${state.capturedAt}` : "",
   ]
     .filter(Boolean)

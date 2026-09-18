@@ -5,7 +5,10 @@ import {
   parseImportBody,
   verifyCollectorToken,
 } from "@/lib/research/collector";
+import { runMissingHeatPull } from "@/lib/research/pull";
 import { describeRecord, recordObservations } from "@/lib/research/record";
+import { screenAndPruneRivals } from "@/lib/research/screen-run";
+import { ensureShopTask } from "@/lib/research/shop";
 import { parsePageSnapshot } from "@/lib/research/snapshot";
 import { logActivity, mutateState } from "@/lib/store";
 
@@ -39,9 +42,6 @@ export async function POST(request: Request) {
       return { status: 401, ok: false, message: "采集密钥不对。" };
     }
 
-    const task = state.research.tasks.find((t) => t.id === taskId);
-    if (!task) return { status: 404, ok: false, message: "找不到这个研究任务。" };
-
     if (parsed.items.length === 0) {
       return {
         status: 422,
@@ -50,19 +50,45 @@ export async function POST(request: Request) {
       };
     }
 
-    const summary = recordObservations(state, taskId, parsed, now);
+    // 店铺在售列表归这家店自己的任务，不管弹窗上选的是哪个 ——
+    // 整店的货混进关键词任务会被当成不可比清掉。
+    const task = parsed.shop
+      ? ensureShopTask(state, parsed.shop, now)
+      : state.research.tasks.find((t) => t.id === taskId);
+    if (!task) return { status: 404, ok: false, message: "找不到这个研究任务。" };
+
+    const summary = recordObservations(state, task.id, parsed, now);
     const text = describeRecord(summary);
     logActivity(state, "human", `采集端投入「${task.name}」：${text}。`, now);
 
     return {
       status: 200,
       ok: true,
+      taskId: task.id,
+      isShop: task.kind === "shop",
       message: [text, ...parsed.warnings].join("；"),
       summary,
     };
   });
 
-  if (result.ok) revalidatePath("/research");
+  if (result.ok) {
+    const landedTaskId = result.taskId ?? taskId;
+    // 店铺任务要的是全貌，跑关键词清理会把整店筛掉一半
+    const screened = result.isShop
+      ? { message: "" }
+      : await screenAndPruneRivals(landedTaskId);
+    revalidatePath("/research");
+    // 想要和浏览只在商详上，交给限速队列慢慢补，不在这里连开
+    void runMissingHeatPull({ taskId: landedTaskId, auto: true });
+    const { status, ...payload } = result;
+    return NextResponse.json(
+      {
+        ...payload,
+        message: [payload.message, screened.message].filter(Boolean).join(" "),
+      },
+      { status },
+    );
+  }
 
   const { status, ...payload } = result;
   return NextResponse.json(payload, { status });

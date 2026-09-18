@@ -14,12 +14,14 @@ import type {
   RuleKind,
   TickTrigger,
 } from "@/lib/domain/types";
+import { MAX_ACTIONS, MAX_RUNS } from "@/lib/domain/limits";
 import { daysSince, hoursSince, parseYuanToCents, yuan } from "@/lib/format";
 import {
   INTENT_LABEL,
-  awaitingSellerReply,
   classifyIntent,
   draftReply,
+  isFreshWait,
+  lastActivityAt,
   lastBuyerMessage,
 } from "./reply";
 
@@ -141,18 +143,14 @@ function latestOrderForConversation(
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
 }
 
-function proposeReplies(state: AppState): Proposal[] {
+function proposeReplies(state: AppState, now: number): Proposal[] {
   const rule = findRule(state, "auto_reply");
   if (!rule) return [];
   const maxPerRun = rule.params.maxPerRun ?? 6;
 
   return state.conversations
-    .filter(awaitingSellerReply)
-    .sort((a, b) => {
-      const at = Date.parse(a.messages.at(-1)?.createdAt ?? "");
-      const bt = Date.parse(b.messages.at(-1)?.createdAt ?? "");
-      return at - bt;
-    })
+    .filter((conversation) => isFreshWait(conversation, now))
+    .sort((a, b) => lastActivityAt(b) - lastActivityAt(a))
     .slice(0, maxPerRun)
     .map((conversation) => {
       const listing = state.listings.find((l) => l.id === conversation.listingId);
@@ -238,7 +236,7 @@ export function proposeActions(state: AppState, now: number): Proposal[] {
   );
 
   return [
-    ...proposeReplies(state),
+    ...proposeReplies(state, now),
     ...proposeShipments(state, now),
     ...proposePriceDrop(state, now),
     ...proposeRefresh(state, now),
@@ -246,12 +244,12 @@ export function proposeActions(state: AppState, now: number): Proposal[] {
   ].filter((proposal) => !pendingKeys.has(actionKey(proposal.payload)));
 }
 
-export function applyAction(
+export async function applyAction(
   state: AppState,
   action: AgentAction,
   adapter: XianyuAdapter,
   now: number,
-): AdapterResult {
+): Promise<AdapterResult> {
   const { payload } = action;
   switch (payload.type) {
     case "refresh_listing":
@@ -287,13 +285,13 @@ export interface ActionEdits {
  * 先在 payload 副本上改，执行成功了才写回 —— 一次被拒绝的编辑
  * （比如把价格填到底价以下）不能把队列里的建议改坏。
  */
-export function applyActionWithEdits(
+export async function applyActionWithEdits(
   state: AppState,
   action: AgentAction,
   edits: ActionEdits,
   adapter: XianyuAdapter,
   now: number,
-): AdapterResult {
+): Promise<AdapterResult> {
   const payload = { ...action.payload };
 
   if (payload.type === "send_reply" && edits.text !== undefined) {
@@ -313,7 +311,7 @@ export function applyActionWithEdits(
     }
   }
 
-  const outcome = applyAction(state, { ...action, payload }, adapter, now);
+  const outcome = await applyAction(state, { ...action, payload }, adapter, now);
   if (outcome.ok) action.payload = payload;
   return outcome;
 }
@@ -358,15 +356,27 @@ export interface TickResult {
   run: AgentRun;
 }
 
-/** 跑一轮 Agent：产生提案，自动执行低风险项，其余进审批队列。 */
-export function runTick(
+/** 把提案落进队列或直接执行。巡检和 pi-agent 选完之后都走这里。 */
+export async function applyProposals(
   state: AppState,
+  proposals: Proposal[],
   adapter: XianyuAdapter,
   now: number,
   trigger: TickTrigger = "manual",
-): TickResult {
+): Promise<TickResult> {
   const startedAt = Date.now();
-  const proposals = proposeActions(state, now);
+  const pendingKeys = new Set(
+    state.actions.filter((action) => action.status === "pending").map((action) => actionKey(action.payload)),
+  );
+  const unique: Proposal[] = [];
+  const seen = new Set<string>();
+  for (const proposal of proposals) {
+    const key = actionKey(proposal.payload);
+    if (pendingKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(proposal);
+  }
+
   const result: TickResult = {
     queued: [],
     applied: [],
@@ -385,7 +395,7 @@ export function runTick(
     },
   };
 
-  for (const proposal of proposals) {
+  for (const proposal of unique) {
     const rule = state.rules.find((r) => r.id === proposal.ruleId);
     const needsApproval = rule?.requiresApproval !== false || proposal.forceApproval === true;
 
@@ -407,7 +417,7 @@ export function runTick(
 
     const action = toAction(proposal, now, "applied", "agent");
     action.attempts = 1;
-    const outcome = applyAction(state, action, adapter, now);
+    const outcome = await applyAction(state, action, adapter, now);
     state.actions.unshift(action);
 
     if (outcome.ok) {
@@ -430,7 +440,7 @@ export function runTick(
     if (last) conversation.intent = classifyIntent(last.text, listing);
   }
 
-  state.actions = state.actions.slice(0, 200);
+  state.actions = state.actions.slice(0, MAX_ACTIONS);
   state.lastTickAt = new Date(now).toISOString();
 
   result.run.queued = result.queued.length;
@@ -438,19 +448,29 @@ export function runTick(
   result.run.failed = result.failed.length;
   result.run.skipped = result.skipped;
   result.run.durationMs = Math.max(0, Date.now() - startedAt);
-  state.runs = [result.run, ...(state.runs ?? [])].slice(0, 50);
+  state.runs = [result.run, ...(state.runs ?? [])].slice(0, MAX_RUNS);
 
   return result;
 }
 
+/** 规则巡检：先算出提案，再入库。测试和没配模型时走这条。 */
+export async function runTick(
+  state: AppState,
+  adapter: XianyuAdapter,
+  now: number,
+  trigger: TickTrigger = "manual",
+): Promise<TickResult> {
+  return applyProposals(state, proposeActions(state, now), adapter, now, trigger);
+}
+
 /** 重试一条执行失败的动作。失败了就把新的原因写回去，次数累加。 */
-export function retryAction(
+export async function retryAction(
   state: AppState,
   action: AgentAction,
   adapter: XianyuAdapter,
   now: number,
-): AdapterResult {
-  const outcome = applyAction(state, action, adapter, now);
+): Promise<AdapterResult> {
+  const outcome = await applyAction(state, action, adapter, now);
   action.attempts = (action.attempts ?? 1) + 1;
 
   if (outcome.ok) {

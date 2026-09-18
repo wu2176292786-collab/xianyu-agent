@@ -4,7 +4,14 @@ import type {
   RivalListing,
   RivalObservation,
 } from "@/lib/domain/types";
+import { isListSource } from "@/lib/domain/types";
 import { hoursSince, yuan } from "@/lib/format";
+import {
+  type DailyCompare,
+  clampWatchIntervalHours,
+  dailyCompare,
+} from "./heat";
+import { watchEligibility } from "./monitoring";
 import { lastObservedAt } from "./record";
 import { readDelivery } from "./snapshot";
 
@@ -29,22 +36,86 @@ export interface WantsTrend {
   note?: string;
 }
 
-function detailWants(rival: RivalListing): RivalObservation[] {
+function detailMetric(
+  rival: RivalListing,
+  field: "wants" | "views",
+): RivalObservation[] {
   return rival.observations
-    .filter((o) => o.source === "detail" && o.wants !== undefined)
+    .filter((o) => o.source === "detail" && presentCount(o[field]) !== undefined)
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
 
-export function wantsTrend(rival: RivalListing): WantsTrend {
-  const points = detailWants(rival);
+function presentCount(value: number | undefined): number | undefined {
+  return value !== undefined && value > 0 ? value : undefined;
+}
+
+/**
+ * 表格上给人看的热度：有数就亮出来。
+ *
+ * 趋势仍只比商详对商详；这里把搜索页抽到的「想要 / 浏览」也显示，
+ * 否则从搜索结果加进来的同行全是「—」。
+ */
+export function latestHeat(rival: RivalListing): {
+  wants?: number;
+  wantsFrom?: RivalObservation["wantsFrom"];
+  views?: number;
+  viewsFrom?: RivalObservation["viewsFrom"];
+} {
+  const ranked = [...rival.observations].sort(
+    (a, b) => Date.parse(a.at) - Date.parse(b.at),
+  );
+  const pick = <K extends "wants" | "views">(field: K) => {
+    const details = ranked.filter(
+      (o) => o.source === "detail" && presentCount(o[field]) !== undefined,
+    );
+    const any = ranked.filter((o) => presentCount(o[field]) !== undefined);
+    return (details.at(-1) ?? any.at(-1)) as RivalObservation | undefined;
+  };
+  const want = pick("wants");
+  const view = pick("views");
+  return {
+    wants: presentCount(want?.wants),
+    wantsFrom: want?.wantsFrom,
+    views: presentCount(view?.views),
+    viewsFrom: view?.viewsFrom,
+  };
+}
+
+/** 表格上空着的热度该怎么解释，避免看起来像采集失败。 */
+export function heatGap(rival: RivalListing): {
+  wants?: string;
+  views?: string;
+} {
+  // 搜索卡和店铺列表卡都没有浏览，只有商详才有
+  const onlyList =
+    rival.observations.length > 0 &&
+    rival.observations.every((observation) => isListSource(observation.source));
+  if (onlyList) {
+    return {
+      wants: "还没打开商品页",
+      views: "还没打开商品页",
+    };
+  }
+  return {
+    wants: "商详还没抽到想要",
+    views: "商详还没抽到浏览",
+  };
+}
+
+export function metricTrend(
+  rival: RivalListing,
+  field: "wants" | "views",
+): WantsTrend {
+  const label = field === "wants" ? "想要" : "浏览";
+  const points = detailMetric(rival, field);
   if (points.length === 0) {
-    return { note: "还没有一次商详观察抽到「想要」。" };
+    return { note: `还没有一次商详观察抽到「${label}」。` };
   }
 
   const latest = points.at(-1)!;
   if (points.length === 1) {
     return {
-      latest: latest.wants,
+      latest: latest[field],
       latestAt: latest.at,
       note: "只有一次观察，再回访一次才能看出变化。",
     };
@@ -52,18 +123,25 @@ export function wantsTrend(rival: RivalListing): WantsTrend {
 
   const previous = points.at(-2)!;
   const hours = (Date.parse(latest.at) - Date.parse(previous.at)) / 3_600_000;
-  const delta = latest.wants! - previous.wants!;
+  const delta = latest[field]! - previous[field]!;
 
   return {
-    latest: latest.wants,
+    latest: latest[field],
     latestAt: latest.at,
-    previous: previous.wants,
+    previous: previous[field],
     previousAt: previous.at,
     delta,
     hours,
-    // 间隔太短的话日均增速会被放得很夸张，索引不算
     perDay: hours >= 1 ? (delta / hours) * 24 : undefined,
   };
+}
+
+export function wantsTrend(rival: RivalListing): WantsTrend {
+  return metricTrend(rival, "wants");
+}
+
+export function viewsTrend(rival: RivalListing): WantsTrend {
+  return metricTrend(rival, "views");
 }
 
 /** 最近一次带价格的观察。价格没有商详 / 搜索的口径差异，所以两种都算。 */
@@ -157,6 +235,92 @@ export function revisitQueue(
     .sort((a, b) => b.hours - a.hours);
 }
 
+export interface WatchItem {
+  rival: RivalListing;
+  lastAt: string;
+  hours: number;
+  heat: ReturnType<typeof latestHeat>;
+  wants: WantsTrend;
+  views: WantsTrend;
+  wantsDaily: DailyCompare;
+  viewsDaily: DailyCompare;
+  /** 当前可安全打开商详采集。 */
+  due: boolean;
+  /** 这个监控间隔内已经开过商详，不管有没有读到数。 */
+  triedThisInterval: boolean;
+}
+
+/** 你盯着的货。监控清单只放亲自标记的，不把搜索页一铺进来的全挤进来。 */
+export function watchBoard(
+  task: ResearchTask,
+  rivals: RivalListing[],
+  now: number,
+  intervalHours?: number,
+): WatchItem[] {
+  const interval = clampWatchIntervalHours(intervalHours);
+  return rivals
+    .filter(
+      (rival) =>
+        rival.taskId === task.id &&
+        rival.watched &&
+        rival.alignment === "comparable",
+    )
+    .map((rival) => {
+      const lastAt = lastObservedAt(rival);
+      const hours = hoursSince(lastAt, now);
+      const heat = latestHeat(rival);
+      const eligibility = watchEligibility(rival, now, interval);
+      return {
+        rival,
+        lastAt,
+        hours,
+        heat,
+        wants: wantsTrend(rival),
+        views: viewsTrend(rival),
+        wantsDaily: dailyCompare(rival, "wants", now),
+        viewsDaily: dailyCompare(rival, "views", now),
+        due: eligibility.eligible,
+        triedThisInterval: eligibility.reason === "retry_interval",
+      };
+    })
+    .sort((a, b) => Number(b.due) - Number(a.due) || b.hours - a.hours);
+}
+
+/** 导航角标：有监控就只催监控的，免得搜索卡把数字撑爆。 */
+export function researchDueCount(
+  task: ResearchTask,
+  rivals: RivalListing[],
+  now: number,
+  intervalHours?: number,
+): number {
+  const watched = watchBoard(task, rivals, now, intervalHours);
+  if (watched.length > 0) return watched.filter((item) => item.due).length;
+  return revisitQueue(task, rivals, now).length;
+}
+
+/** 角标点进去按这个顺序走，和任务条上的左右顺序一致。 */
+export function researchDueTaskIds(
+  tasks: ResearchTask[],
+  rivals: RivalListing[],
+  now: number,
+  intervalHours?: number,
+): string[] {
+  return tasks
+    .filter((task) => task.status === "active")
+    .filter((task) => researchDueCount(task, rivals, now, intervalHours) > 0)
+    .map((task) => task.id);
+}
+
+/** 已经停在某个待回访任务上就进下一个，否则从第一个开始。 */
+export function nextDueTaskId(
+  dueTaskIds: string[],
+  currentTaskId?: string | null,
+): string | undefined {
+  if (dueTaskIds.length === 0) return undefined;
+  const idx = currentTaskId ? dueTaskIds.indexOf(currentTaskId) : -1;
+  return dueTaskIds[(idx + 1) % dueTaskIds.length];
+}
+
 export interface Evidence {
   label: string;
   url: string;
@@ -178,15 +342,85 @@ export interface Finding {
  * 2. **不出现观察点里没有的数字。** 和 LLM 润色不许编数字是同一条；
  * 3. **只在研究台展示，不进行动队列。** 改标题、改价格都得你亲自决定。
  */
+/** 同行标题/文案里反复出现、本店没写的卖点。只认看得见的字，不编。 */
+const SELLING_HOOKS = [
+  "包邮",
+  "当天发",
+  "秒发",
+  "现货",
+  "顺丰",
+  "验货宝",
+  "支持验货",
+  "可刀",
+  "可小刀",
+  "全新未拆",
+  "未拆封",
+  "保修",
+  "支持退",
+];
+
+export function highlightGaps(
+  listing: Listing,
+  comparable: RivalListing[],
+): Finding | undefined {
+  if (comparable.length === 0) return undefined;
+  const mine = `${listing.title} ${listing.tags.join(" ")} ${listing.copy ?? ""}`;
+  const hits = SELLING_HOOKS.flatMap((hook) => {
+    if (mine.includes(hook)) return [];
+    const rivals = comparable.filter((rival) =>
+      `${rival.title} ${rival.copy ?? ""}`.includes(hook),
+    );
+    return rivals.length > 0 ? [{ hook, rivals }] : [];
+  }).sort((a, b) => b.rivals.length - a.rivals.length);
+
+  if (hits.length === 0) return undefined;
+  const top = hits.slice(0, 4);
+  return {
+    id: "highlight_gap",
+    severity: "info",
+    text:
+      `可比同行里有这些你标题/文案没写的卖点：` +
+      `${top.map((item) => `${item.hook}（${item.rivals.length} 件）`).join("、")}。`,
+    evidence: top
+      .flatMap((item) =>
+        item.rivals.slice(0, 2).map((rival) => ({
+          label: `${rival.title.slice(0, 18)} · ${item.hook}`,
+          url: rival.observations.at(-1)?.pageUrl ?? rival.url,
+        })),
+      )
+      .slice(0, 4),
+  };
+}
+
+/** 「必须含」和「必须不含」不能有交集，否则标题一命中就同时是可比又是不同款。 */
+export function overlappingSpecWords(task: ResearchTask): string[] {
+  const exclude = new Set(task.mustExclude.map((word) => word.toLowerCase()));
+  return task.mustInclude.filter((word) => exclude.has(word.toLowerCase()));
+}
+
 export function findingsFor(
   task: ResearchTask,
   rivals: RivalListing[],
   listing: Listing | undefined,
   now: number,
+  searchPages = 3,
 ): Finding[] {
   const mine = rivals.filter((r) => r.taskId === task.id);
   const comparable = mine.filter((r) => r.alignment === "comparable");
   const findings: Finding[] = [];
+
+  if (mine.length === 0) {
+    const query = task.keyword.trim() || task.name;
+    findings.push({
+      id: "empty",
+      severity: "info",
+      text:
+        `还没有采集到任何同行。在商品页点「看对手」会按标题连翻 ${searchPages} 页「${query}」；` +
+        `也可以用页面底部的采集端导入搜索页（会真点 ${searchPages} 页）或商详。「运行 Agent」不会自己去搜。`,
+      evidence: [],
+    });
+    return findings;
+  }
 
   if (comparable.length < 2) {
     findings.push({
@@ -288,6 +522,9 @@ export function findingsFor(
       });
     }
   }
+
+  const highlights = listing ? highlightGaps(listing, comparable) : undefined;
+  if (highlights) findings.push(highlights);
 
   const due = revisitQueue(task, mine, now);
   if (due.length > 0) {

@@ -1,15 +1,20 @@
 import { ListingsTable } from "@/components/listings-table";
 import { StatCard } from "@/components/stat-card";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SearchPagesControl } from "@/components/search-pages-control";
 import { hoursSince, nowMs, yuan } from "@/lib/format";
+import { clampSearchPages } from "@/lib/research/search-pager";
 import { getState } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
+/** 看对手要连翻最多 20 页再补几件商详，默认 10 秒会被掐掉。 */
+export const maxDuration = 180;
 
 export default async function ListingsPage() {
   const state = await getState();
   const now = nowMs();
 
+  const searchPages = clampSearchPages(state.research.searchPages);
   const onSale = state.listings.filter((l) => l.status === "on_sale");
   const stale = onSale.filter((l) => hoursSince(l.lastRefreshedAt, now) >= 24);
   const inventoryValue = onSale.reduce((acc, l) => acc + l.priceCents * l.stock, 0);
@@ -19,7 +24,7 @@ export default async function ListingsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">商品</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          底价是 Agent 的红线：自动降价永远不会低于它，手动改价也会被拦。
+          底价是 Agent 的红线：自动降价永远不会低于它，手动改价也会被拦。点「看对手」会读这件货的标题和文案，在浏览器里点 {searchPages} 页同类搜索。
         </p>
       </div>
 
@@ -39,8 +44,11 @@ export default async function ListingsPage() {
         <CardHeader className="border-b py-4">
           <CardTitle>全部商品</CardTitle>
           <CardDescription>
-            擦亮、改价、下架都会立刻作用在本地模拟通道上，并记入动态。
+            「看对手」只在你点的时候连翻 {searchPages} 页，不会后台轮询。搜完会跳到选品研究看价格带和卖点。
           </CardDescription>
+          <CardAction>
+            <SearchPagesControl value={searchPages} />
+          </CardAction>
         </CardHeader>
         <CardContent className="px-0">
           <ListingsTable listings={state.listings} />

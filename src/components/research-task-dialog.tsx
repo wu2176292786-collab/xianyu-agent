@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { createResearchTask } from "@/app/actions";
+import { createResearchTask, draftResearchTaskRules } from "@/app/actions";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,9 +15,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import type { Listing } from "@/lib/domain/types";
 
 const EMPTY = {
+  prompt: "",
   name: "",
   keyword: "",
   mustInclude: "",
@@ -26,11 +28,19 @@ const EMPTY = {
   revisitHours: "48",
 };
 
-export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
+export function ResearchTaskDialog({
+  listings,
+  llmConfigured = false,
+}: {
+  listings: Listing[];
+  llmConfigured?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
   const [pending, startTransition] = useTransition();
+  const [drafting, startDraft] = useTransition();
   const router = useRouter();
+  const busy = pending || drafting;
 
   const submit = () =>
     startTransition(async () => {
@@ -43,10 +53,32 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
       }
     });
 
+  const fillFromModel = () =>
+    startDraft(async () => {
+      const result = await draftResearchTaskRules({
+        prompt: form.prompt,
+        linkedListingId: form.linkedListingId || undefined,
+      });
+      if (!result.ok || !result.draft) {
+        toast.error(result.message);
+        return;
+      }
+      const draft = result.draft;
+      setForm((prev) => ({
+        ...prev,
+        name: draft.name,
+        keyword: draft.keyword,
+        mustInclude: draft.mustInclude.join(" "),
+        mustExclude: draft.mustExclude.join(" "),
+      }));
+      toast.success(result.message);
+    });
+
   const field = (key: keyof typeof form) => ({
     value: form[key],
-    onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
-      setForm((prev) => ({ ...prev, [key]: event.target.value })),
+    onChange: (
+      event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+    ) => setForm((prev) => ({ ...prev, [key]: event.target.value })),
   });
 
   return (
@@ -59,28 +91,60 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
           <DialogHeader>
             <DialogTitle>新建选品研究</DialogTitle>
             <DialogDescription>
-              「统一规格」决定谁能进价格带：命中任一「必须不含」判为不同款，
-              命中全部「必须含」判为可比，其余一律存疑。
+              创建任务只是开一个文件夹。同行要从闲鱼页面用采集端投进来，
+              不会在后台自动搜索。
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
             <div className="space-y-1.5">
+              <Label htmlFor="rt-prompt">用一句话说你想找什么</Label>
+              <Textarea
+                id="rt-prompt"
+                placeholder="我想找卖 AI 智能体课程的，不要卖教材和书的"
+                rows={3}
+                disabled={busy}
+                {...field("prompt")}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !llmConfigured}
+                  onClick={fillFromModel}
+                >
+                  {drafting ? "正在填…" : "让模型填"}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  {llmConfigured
+                    ? "填进下面的格子，确认后再创建。"
+                    : "还没配置模型，请手填。"}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
               <Label htmlFor="rt-name">任务名称</Label>
               <Input
                 id="rt-name"
                 placeholder="Switch OLED 同款盯价"
+                disabled={busy}
                 {...field("name")}
               />
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="rt-keyword">搜索关键词</Label>
+              <Label htmlFor="rt-keyword">你准备在闲鱼搜的词</Label>
               <Input
                 id="rt-keyword"
                 placeholder="switch oled 白色"
+                disabled={busy}
                 {...field("keyword")}
               />
+              <p className="text-xs text-muted-foreground">
+                只是提醒你去搜什么，应用不会替你搜。
+              </p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -89,6 +153,7 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
                 <Input
                   id="rt-include"
                   placeholder="OLED 白色"
+                  disabled={busy}
                   {...field("mustInclude")}
                 />
               </div>
@@ -96,7 +161,8 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
                 <Label htmlFor="rt-exclude">必须不含</Label>
                 <Input
                   id="rt-exclude"
-                  placeholder="续航版 破解"
+                  placeholder="可选，如 日版 配件"
+                  disabled={busy}
                   {...field("mustExclude")}
                 />
               </div>
@@ -109,6 +175,7 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
                   id="rt-listing"
                   className="h-9 w-full rounded-md border bg-transparent px-3 text-sm"
                   value={form.linkedListingId}
+                  disabled={busy}
                   onChange={(event) =>
                     setForm((prev) => ({
                       ...prev,
@@ -129,6 +196,7 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
                 <Input
                   id="rt-revisit"
                   inputMode="numeric"
+                  disabled={busy}
                   {...field("revisitHours")}
                 />
               </div>
@@ -144,11 +212,11 @@ export function ResearchTaskDialog({ listings }: { listings: Listing[] }) {
             <Button
               variant="ghost"
               onClick={() => setOpen(false)}
-              disabled={pending}
+              disabled={busy}
             >
               取消
             </Button>
-            <Button onClick={submit} disabled={pending}>
+            <Button onClick={submit} disabled={busy}>
               创建
             </Button>
           </DialogFooter>

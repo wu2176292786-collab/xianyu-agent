@@ -3,6 +3,7 @@ import { ActionCard } from "@/components/action-card";
 import { AgentTickButton } from "@/components/agent-tick-button";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { StatCard } from "@/components/stat-card";
+import { StoreSyncButton } from "@/components/store-sync-button";
 import { TrendChart } from "@/components/trend-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,9 +15,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { nextScheduledTickAt } from "@/lib/agent/engine";
-import { awaitingSellerReply } from "@/lib/agent/reply";
-import type { ActivityKind } from "@/lib/domain/types";
-import { nowMs, relativeTime, yuan } from "@/lib/format";
+import { shopHeatFromListings } from "@/lib/agent/sync";
+import type { ActivityKind, DailyMetric } from "@/lib/domain/types";
+import { nowMs, relativeTime, shopDay, yuan } from "@/lib/format";
 import { getState } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -41,22 +42,38 @@ export default async function DashboardPage() {
 
   const last7 = state.metrics.slice(-7);
   const prev7 = state.metrics.slice(-14, -7);
-  const views = sum(last7.map((m) => m.views));
-  const prevViews = sum(prev7.map((m) => m.views));
+  const listingHeat = shopHeatFromListings(state.listings);
+  const useListingHeat = listingHeat.known > 0;
+  const views = useListingHeat ? listingHeat.views : sum(last7.map((m) => m.views));
+  const weekAgo = state.metrics.find((row) => row.date === shopDay(nowMs() - 7 * 24 * 60 * 60 * 1000));
+  const prevViews = useListingHeat ? weekAgo?.views : sum(prev7.map((m) => m.views));
   const gmv = sum(last7.map((m) => m.gmvCents));
   const prevGmv = sum(prev7.map((m) => m.gmvCents));
+  const chartMetrics: DailyMetric[] =
+    state.metrics.length > 0
+      ? state.metrics
+      : listingHeat.known > 0
+        ? [
+            {
+              date: shopDay(nowMs()),
+              views: listingHeat.views,
+              inquiries: listingHeat.inquiries,
+              orders: 0,
+              gmvCents: 0,
+            },
+          ]
+        : [];
 
   const onSale = state.listings.filter((l) => l.status === "on_sale");
-  const needsReply = state.conversations.filter(awaitingSellerReply);
-  const pendingShipment = state.orders.filter((o) => o.status === "pending_shipment");
+  const needsReply = state.conversations.filter((c) => c.status === "needs_reply");
   const pendingActions = state.actions.filter((a) => a.status === "pending");
   const failedActions = state.actions.filter((a) => a.status === "failed");
   const nextTickAt = nextScheduledTickAt(state);
   const nextTickMinutes =
     nextTickAt === null ? null : Math.max(0, Math.round((nextTickAt - nowMs()) / 60_000));
-  const recentActivity = [...state.activity]
-    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-    .slice(0, 8);
+  const recentActivity = [...state.activity].sort(
+    (a, b) => Date.parse(b.at) - Date.parse(a.at),
+  );
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
@@ -66,7 +83,7 @@ export default async function DashboardPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">总览</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Agent 会盯着商品、消息和订单，把该做的事整理成建议交给你确认。
+            刷新店铺数据会拉取最新商品、曝光和消息；运行 Agent 只会巡检已刷新数据，把该做的事整理成建议交给你确认。
             {nextTickMinutes === null
               ? "自动巡检已关闭，需要你手动跑。"
               : nextTickMinutes === 0
@@ -74,7 +91,10 @@ export default async function DashboardPage() {
                 : `下一轮自动巡检约 ${nextTickMinutes} 分钟后。`}
           </p>
         </div>
-        <AgentTickButton />
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <StoreSyncButton lastSyncAt={state.lastSyncAt} />
+          <AgentTickButton />
+        </div>
       </div>
 
       {failedActions.length > 0 ? (
@@ -104,8 +124,12 @@ export default async function DashboardPage() {
           icon="👀"
           label="近 7 天曝光"
           value={views.toLocaleString("zh-CN")}
-          delta={delta(views, prevViews)}
-          hint="较上周"
+          delta={prevViews === undefined ? undefined : delta(views, prevViews)}
+          hint={
+            useListingHeat
+              ? `在售 ${listingHeat.known} 件已同步浏览`
+              : "较上周"
+          }
         />
         <StatCard
           icon="💰"
@@ -121,10 +145,10 @@ export default async function DashboardPage() {
           hint={needsReply.length > 0 ? "买家正在等你" : "都回完了"}
         />
         <StatCard
-          icon="📦"
-          label="待发货订单"
-          value={String(pendingShipment.length)}
-          hint={`在售 ${onSale.length} 件商品`}
+          icon="🏷️"
+          label="在售商品"
+          value={String(onSale.length)}
+          hint="件"
         />
       </div>
 
@@ -137,16 +161,18 @@ export default async function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <TrendChart metrics={state.metrics} />
+            <TrendChart metrics={chartMetrics} />
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
+        <Card className="max-h-[min(28rem,60vh)] min-h-0">
+          <CardHeader className="shrink-0">
             <CardTitle>最近动态</CardTitle>
-            <CardDescription>Agent 和你的每一次操作都会记录在这里。</CardDescription>
+            <CardDescription>
+              Agent 和你的每一次操作都会记录在这里。记录多了就在框里往下翻。
+            </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain">
             {recentActivity.length === 0 ? (
               <p className="text-sm text-muted-foreground">还没有任何操作记录。</p>
             ) : (

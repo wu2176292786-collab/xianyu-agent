@@ -11,6 +11,32 @@ const DAY = 24 * HOUR;
  */
 const SHOP_TIME_ZONE = "Asia/Shanghai";
 
+/** 北京时间的日历日，用来做「今天 / 昨天」对比。 */
+export function shopDay(at: number | string): string {
+  const date = new Date(typeof at === "string" ? Date.parse(at) : at);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: SHOP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+export function previousShopDay(day: string): string {
+  const match = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return day;
+  const utc = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return shopDay(utc - DAY);
+}
+
+/** `2026-09-15` → `9月15日`，给监控板写「较上次」。 */
+export function shopDayLabel(day: string): string {
+  const match = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return day;
+  return `${Number(match[2])}月${Number(match[3])}日`;
+}
+
 /** 分 → 「¥1,234.00」 */
 export function yuan(cents: number): string {
   return `¥${(cents / 100).toLocaleString("zh-CN", {

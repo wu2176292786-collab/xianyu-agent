@@ -1,4 +1,12 @@
-import type { Conversation, Listing, Order, OrderStatus } from "@/lib/domain/types";
+import { FRESH_REPLY_WINDOW_MS } from "@/lib/agent/reply";
+import type {
+  Conversation,
+  Listing,
+  Message,
+  MessageAuthor,
+  Order,
+  OrderStatus,
+} from "@/lib/domain/types";
 import { getList, pickNumber, pickString } from "./paths";
 
 /**
@@ -160,6 +168,11 @@ const SESSION_LAST_AT = [
   "modifyTime",
 ];
 const SESSION_UNREAD = ["message.summary.unread", "unreadCount", "unread"];
+const SESSION_LAST_SENDER = [
+  "message.summary.senderUserId",
+  "message.senderUserId",
+  "lastMessageSenderId",
+];
 
 /** 两侧的身份信息。谁是对方，取决于哪一边的 userId 不是我。 */
 const SESSION_SIDES = [
@@ -191,16 +204,16 @@ const SINGLE_CHAT = 1;
  * 会话列表 → 领域模型。
  *
  * 只能还原出「最后一条消息」这一条记录 —— 会话列表接口本来就只给摘要
- * （`message.summary.summary`）。完整对话要另外调
- * `mtop.taobao.idlemessage.pc.message.sync`，所以这里**不假装拿到了完整聊天记录**。
+ * （`message.summary.summary`）。完整对话由 reader 再调
+ * `mtop.taobao.idlemessage.pc.message.sync` 补上。
  *
  * 谁是买家：实测 `ownerInfo` **不一定是我** —— 有的会话里我在 `userInfo` 那边。
  * 所以对方只能靠「userId 不等于我的 unb」来认。认不出我自己的 id 时退回
  * `userInfo`，因为绝大多数会话里它就是对方。
  *
- * 最后一条是谁说的：摘要里没有发送者 id，只能按未读数判断 —— 未读 > 0 就是
- * 买家刚说过话。不完美，但比瞎猜作者老实：至少不会把自己发的话当成买家提问，
- * 让 Agent 去回复自己。
+ * 最后一条是谁说的：摘要有时带 senderUserId，能对上自己或对方就用。
+ * 对不上才按未读数 —— 未读 > 0 算对方刚说过。未读为 0 仍按我，
+ * 避免把刚发出去的话当成买家提问，让 Agent 回复自己。
  */
 export function mapConversations(
   payload: unknown,
@@ -240,30 +253,322 @@ export function mapConversations(
       }) ?? SESSION_SIDES[0];
     const buyerName =
       pickString(record, [...peer.nick]) ?? pickString(record, SESSION_PEER_FALLBACK) ?? "买家";
+    const buyerId = pickString(record, [peer.id]);
 
     const unread = pickNumber(record, SESSION_UNREAD) ?? 0;
     const at = pickNumber(record, SESSION_LAST_AT);
+    const lastAt = at && at > 1_000_000_000_000 ? at : now;
+    const fresh = now - lastAt <= FRESH_REPLY_WINDOW_MS;
+    const lastSender = pickString(record, SESSION_LAST_SENDER);
+    const lastAuthor =
+      lastSender && selfUserId && lastSender === selfUserId
+        ? "seller"
+        : lastSender && buyerId && lastSender === buyerId
+          ? "buyer"
+          : unread > 0
+            ? "buyer"
+            : "seller";
 
     items.push({
       id,
       buyerName,
       buyerEmoji: "🐟",
+      buyerId,
       listingId: pickString(record, SESSION_ITEM_ID) ?? "",
-      status: unread > 0 ? "needs_reply" : "awaiting_buyer",
+      status: unread > 0 && fresh ? "needs_reply" : "awaiting_buyer",
       // 意图由 runTick 按文本重新判定，这里不猜
       intent: "other",
       messages: [
         {
           id: `${id}-last`,
-          author: unread > 0 ? "buyer" : "seller",
+          author: lastAuthor,
           text,
-          createdAt: new Date(at && at > 1_000_000_000_000 ? at : now).toISOString(),
+          createdAt: new Date(lastAt).toISOString(),
         },
       ],
     });
   }
 
+  // 平台返回顺序不是严格按最近活跃。消息页要的是最新的，这里排好。
+  items.sort((a, b) => {
+    const aAt = Date.parse(a.messages.at(-1)?.createdAt ?? "") || 0;
+    const bAt = Date.parse(b.messages.at(-1)?.createdAt ?? "") || 0;
+    return bAt - aAt;
+  });
+
   return { items, skipped, ignored };
+}
+
+/* ── 历史消息（mtop.taobao.idlemessage.pc.message.sync）─────────────────── */
+
+/**
+ * 这个接口的 `req` 必须是**字符串化的 JSON**。
+ *
+ * 传对象会被网关当成「没这个参数」：`FAIL_SYS_BIZPARAM_MISSED::缺少业务参数req`。
+ * 字段名是 `fetchs`（不是 fetchNum），少了就是 `FAIL_BIZ_334`。
+ */
+export function messageSyncReq(sessionId: string, start = 0, fetchs = 50): { req: string } {
+  return {
+    req: JSON.stringify({ sessionId, start, fetchs, type: 1 }),
+  };
+}
+
+const MESSAGE_LIST_PATHS = [
+  "messages",
+  "data.messages",
+  "userMessageModels",
+  "data.userMessageModels",
+];
+const MESSAGE_ID = [
+  "messageId",
+  "messageUuid",
+  "args.msg_id",
+  "id",
+  "message.messageId",
+  "message.messageUuid",
+  "message.args.msg_id",
+  "extension.msgId",
+];
+const MESSAGE_TEXT = [
+  "content.text.text",
+  "content.text",
+  "text",
+  "summary",
+  "extension.reminderContent",
+  "message.content.text.text",
+  "message.extension.reminderContent",
+];
+const MESSAGE_AT = [
+  "createAt",
+  "timeStamp",
+  "timestamp",
+  "ts",
+  "message.createAt",
+  "message.timeStamp",
+  "message.timestamp",
+];
+const MESSAGE_SENDER_ID = [
+  "senderInfo.userId",
+  "extension.senderUserId",
+  "message.senderInfo.userId",
+  "message.extension.senderUserId",
+];
+const MESSAGE_SENDER_NICK = [
+  "senderInfo.nick",
+  "senderInfo.fishNick",
+  "extension.reminderTitle",
+  "message.senderInfo.nick",
+  "message.senderInfo.fishNick",
+  "message.extension.reminderTitle",
+];
+const MESSAGE_KIND = [
+  "arg1",
+  "content.contentType",
+  "message.arg1",
+  "message.content.contentType",
+];
+const CUSTOM_DATA = ["content.custom.data", "message.content.custom.data"];
+
+export interface MessagePeer {
+  peerId?: string;
+  peerNicks?: string[];
+}
+
+function looksMasked(id: string): boolean {
+  return id.includes("*");
+}
+
+/** 网页 IM 有时把一条消息再包进 `message` 里。 */
+export function unwrapMessage(record: unknown): unknown {
+  if (!record || typeof record !== "object") return record;
+  const inner = (record as { message?: unknown }).message;
+  return inner && typeof inner === "object" ? inner : record;
+}
+
+function decodeCustomPayload(record: unknown): Record<string, unknown> | undefined {
+  const raw = pickString(record, CUSTOM_DATA);
+  if (!raw?.trim()) return undefined;
+  try {
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    const parsed: unknown = JSON.parse(decoded);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function messageText(record: unknown): string | undefined {
+  const text = pickString(record, MESSAGE_TEXT);
+  if (text?.trim()) return text;
+
+  const custom = decodeCustomPayload(record);
+  if (custom) {
+    const inner = pickString(custom, ["text.text", "text", "content"]);
+    if (inner?.trim()) return inner;
+    const customKind = pickString(custom, ["contentType"]);
+    if (customKind === "2" || customKind === "image") return "[图片]";
+  }
+
+  const kind = pickString(record, MESSAGE_KIND) ?? "";
+  if (/image|pic|img/i.test(kind) || kind === "2") return "[图片]";
+  if (/video/i.test(kind)) return "[视频]";
+  if (/voice|audio/i.test(kind)) return "[语音]";
+  if (kind && kind !== "1" && kind !== "101" && kind !== "MsgText") return `[${kind}]`;
+  return undefined;
+}
+
+/**
+ * 这条消息是谁说的。
+ *
+ * `senderInfo.userId` 经常是脱敏的（`2***1`），对不上 cookie 里的 `unb`。
+ * 能对上自己的 id / 昵称就是我；能对上会话对方的 id / 昵称就是对方。
+ * 都认不出时按对方算 —— 宁可多标一条待回复，也不要把买家的话当成自己说的漏掉。
+ */
+export function messageAuthor(
+  record: unknown,
+  selfUserId?: string,
+  selfNicks: string[] = [],
+  peer: MessagePeer = {},
+): MessageAuthor {
+  const senderId = pickString(record, MESSAGE_SENDER_ID);
+  if (senderId && !looksMasked(senderId)) {
+    if (selfUserId && senderId === selfUserId) return "seller";
+    if (peer.peerId && senderId === peer.peerId) return "buyer";
+  }
+
+  const nick = pickString(record, MESSAGE_SENDER_NICK);
+  if (nick) {
+    if (selfNicks.some((self) => self && self === nick)) return "seller";
+    if (peer.peerNicks?.some((peerNick) => peerNick && peerNick === nick)) return "buyer";
+  }
+  return "buyer";
+}
+
+/**
+ * 某个会话的历史消息 → 领域模型。
+ *
+ * 按时间升序。接口实测是从旧到新排的，但我们不依赖这个约定。
+ */
+export function mapMessages(
+  payload: unknown,
+  now: number,
+  selfUserId?: string,
+  selfNicks: string[] = [],
+  peer: MessagePeer = {},
+): MapResult<Message> {
+  let records: unknown[] = Array.isArray(payload) ? payload : [];
+  if (records.length === 0) {
+    for (const path of MESSAGE_LIST_PATHS) {
+      records = getList(payload, path);
+      if (records.length > 0) break;
+    }
+  }
+
+  const items: Message[] = [];
+  let skipped = 0;
+
+  for (const raw of records) {
+    const record = unwrapMessage(raw);
+    const id = pickString(record, MESSAGE_ID) ?? pickString(raw, MESSAGE_ID);
+    const text = messageText(record) ?? messageText(raw);
+    if (!id || !text) {
+      skipped += 1;
+      continue;
+    }
+
+    const at = pickNumber(record, MESSAGE_AT) ?? pickNumber(raw, MESSAGE_AT);
+    items.push({
+      id,
+      author: messageAuthor(record, selfUserId, selfNicks, peer),
+      text,
+      createdAt: new Date(at && at > 1_000_000_000_000 ? at : now).toISOString(),
+    });
+  }
+
+  items.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  return { items, skipped };
+}
+
+/** 从历史消息里认出对方：不是我的发送者就是买家。 */
+export function inferMessagePeer(
+  payload: unknown,
+  selfUserId?: string,
+  selfNicks: string[] = [],
+): MessagePeer {
+  let records: unknown[] = Array.isArray(payload) ? payload : [];
+  if (records.length === 0) {
+    for (const path of MESSAGE_LIST_PATHS) {
+      records = getList(payload, path);
+      if (records.length > 0) break;
+    }
+  }
+
+  for (const raw of records) {
+    const record = unwrapMessage(raw);
+    const senderId = pickString(record, MESSAGE_SENDER_ID) ?? pickString(raw, MESSAGE_SENDER_ID);
+    const nick = pickString(record, MESSAGE_SENDER_NICK) ?? pickString(raw, MESSAGE_SENDER_NICK);
+    if (senderId && !looksMasked(senderId) && senderId !== selfUserId) {
+      return { peerId: senderId, peerNicks: nick ? [nick] : [] };
+    }
+    if (nick && !selfNicks.includes(nick)) {
+      return {
+        peerId: senderId && !looksMasked(senderId) ? senderId : undefined,
+        peerNicks: [nick],
+      };
+    }
+  }
+  return {};
+}
+
+function stubConversation(
+  id: string,
+  existing: Conversation | undefined,
+  listingId?: string,
+): Conversation {
+  return {
+    id,
+    buyerName: existing?.buyerName ?? "买家",
+    buyerEmoji: existing?.buyerEmoji ?? "🐟",
+    buyerId: existing?.buyerId,
+    listingId: listingId || existing?.listingId || "",
+    listingTitle: existing?.listingTitle,
+    listingPriceCents: existing?.listingPriceCents,
+    status: existing?.status ?? "awaiting_buyer",
+    intent: existing?.intent ?? "other",
+    offerCents: existing?.offerCents,
+    messages: existing?.messages ?? [],
+  };
+}
+
+/**
+ * HTTP 会话列表经常只有系统通知。IM 长连推来的真人会话要并进去。
+ * 拉到新的收件箱之后，丢掉已经不在两边的旧会话，避免一直显示过期摘要。
+ */
+export function mergeInboxConversations(
+  httpItems: Conversation[],
+  sessions: Array<{ cid: string; sessionType?: number; itemId?: string }>,
+  existing: Conversation[],
+): Conversation[] {
+  const buyerSessions = sessions.filter(
+    (session) => session.sessionType === undefined || session.sessionType === 1,
+  );
+  const byId = new Map<string, Conversation>();
+  for (const item of existing) byId.set(item.id, item);
+  for (const item of httpItems) byId.set(item.id, { ...byId.get(item.id), ...item });
+  for (const session of buyerSessions) {
+    const current = byId.get(session.cid);
+    byId.set(session.cid, stubConversation(session.cid, current, session.itemId));
+  }
+
+  if (httpItems.length === 0 && buyerSessions.length === 0) {
+    return existing;
+  }
+
+  const keep = new Set([
+    ...httpItems.map((item) => item.id),
+    ...buyerSessions.map((session) => session.cid),
+  ]);
+  return [...byId.values()].filter((item) => keep.has(item.id));
 }
 
 /* ── 账号信息（mtop.idle.web.user.page.head）────────────────────────────── */
@@ -336,6 +641,32 @@ export interface ListingMetrics {
   views7d?: number;
   wants?: number;
   stock?: number;
+}
+
+const DETAIL_ID = ["itemDO.itemId", "itemDO.id", "data.itemDO.itemId"];
+const DETAIL_TITLE = ["itemDO.title", "itemDO.itemTitle", "data.itemDO.title", "title"];
+const DETAIL_PRICE_YUAN = ["itemDO.soldPrice", "itemDO.price", "data.itemDO.soldPrice"];
+
+export interface ListingCard {
+  id?: string;
+  title?: string;
+  priceCents?: number;
+}
+
+/**
+ * 从商品详情里取标题和价格。
+ *
+ * 会话列表只给 `itemId`，标题不在 `itemInfo` 里（实测只有 id / 主图 / 卖家）。
+ * 消息页要对得上商品，只能再查一次详情。查到的标题挂在会话上，
+ * **不写进本店 listings** —— 谈的可能是别人的货。
+ */
+export function readListingCard(payload: unknown): ListingCard {
+  const yuan = pickNumber(payload, DETAIL_PRICE_YUAN);
+  return {
+    id: pickString(payload, DETAIL_ID),
+    title: pickString(payload, DETAIL_TITLE),
+    priceCents: yuan === undefined ? undefined : Math.round(yuan * 100),
+  };
 }
 
 /**

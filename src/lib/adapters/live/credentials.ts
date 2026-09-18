@@ -1,4 +1,4 @@
-import { type LoginState, loadLoginState } from "./login-state";
+import { type LoginState, loadLoginState, parseLoginState } from "./login-state";
 import { describeTokenExpiry, extractToken } from "./mtop";
 
 /**
@@ -67,4 +67,37 @@ export function inspectLoginState(state: LoginState | null): CredentialStatus {
 
 export async function credentialStatus(): Promise<CredentialStatus> {
   return inspectLoginState(await loadLoginState());
+}
+
+/**
+ * 把页面上粘过来的导出解析成可落盘的登录态。
+ * 认不出格式就失败，绝不返回半残对象。
+ */
+export function prepareLoginImport(
+  raw: string,
+  now = Date.now(),
+):
+  | { ok: false; message: string }
+  | { ok: true; state: LoginState; warnings: string[] } {
+  const parsed = parseLoginState(raw);
+  if (!parsed) {
+    return {
+      ok: false,
+      message: "解析失败：既不是 cookie 串，也不是认得出来的 JSON。",
+    };
+  }
+
+  const state: LoginState = {
+    ...parsed,
+    capturedAt: parsed.capturedAt ?? new Date(now).toISOString(),
+  };
+  const inspected = inspectLoginState(state);
+  const warnings: string[] = [];
+  if (!inspected.hasSession) {
+    warnings.push("没找到登录态字段，多半是在未登录的页面上点了提取。");
+  }
+  if (!inspected.hasUserAgent) {
+    warnings.push("没拿到 User-Agent。建议用扩展一并导出请求头，避免和 cookie 对不上。");
+  }
+  return { ok: true, state, warnings };
 }

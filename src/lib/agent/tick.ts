@@ -1,7 +1,8 @@
-import { writeChannel } from "@/lib/adapters";
+import { writeChannelFor } from "@/lib/adapters";
 import type { AppState, TickTrigger } from "@/lib/domain/types";
 import { logActivity } from "@/lib/store";
-import { runTick } from "./engine";
+import { applyProposals } from "./engine";
+import { collectProposals } from "./pi/runtime";
 
 export interface TickSummary {
   queued: number;
@@ -17,12 +18,13 @@ export interface TickSummary {
  * 跑一轮巡检并把结果写进动态。手动点按钮和后台定时器走的是同一条路径，
  * 保证两种触发方式的行为完全一致。
  */
-export function performTick(
+export async function performTick(
   state: AppState,
   now: number,
   trigger: TickTrigger,
-): TickSummary {
-  const result = runTick(state, writeChannel, now, trigger);
+): Promise<TickSummary> {
+  const proposals = await collectProposals(state, now);
+  const result = await applyProposals(state, proposals, writeChannelFor(state), now, trigger);
   const prefix = trigger === "scheduled" ? "自动巡检：" : "";
 
   for (const message of result.messages) {

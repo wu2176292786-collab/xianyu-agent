@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "闲鱼选品研究采集端",
-  "version": "1.0.0",
-  "description": "在闲鱼页面上点一下，把当前页已经显示出来的公开数据投进本机的「选品研究」。只读当前页，不替你请求任何别的页面。",
-  "permissions": ["storage", "activeTab"],
+  "version": "1.1.1",
+  "description": "在闲鱼页面上点一下，把搜索页按应用里设定的页数连翻（真点「下一页」）或当前商详投进本机的「选品研究」。",
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://*.goofish.com/*",
     "http://localhost/*",

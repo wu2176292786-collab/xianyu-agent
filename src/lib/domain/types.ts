@@ -31,6 +31,8 @@ export interface Listing {
   wants: number;
   inquiries7d: number;
   tags: string[];
+  /** 商品正文。列表接口不给，点「看对手」时从商详补一次。 */
+  copy?: string;
   /**
    * 平台这次没给浏览 / 想要 / 库存。
    *
@@ -67,6 +69,23 @@ export interface Conversation {
   buyerName: string;
   buyerEmoji: string;
   listingId: string;
+  /**
+   * 会话关联商品的标题。
+   *
+   * 闲鱼的会话只给 `itemId`，标题要另查详情。很多会话谈的还不是
+   * 当前在架的货（已卖掉、已删除、或者你作为买家去问别人），对不上
+   * `listings` 很正常。有标题就先显示标题，不要写成「未知商品」。
+   */
+  listingTitle?: string;
+  /** 关联商品的挂牌价，单位分。详情接口给了才有 */
+  listingPriceCents?: number;
+  /**
+   * 对方的闲鱼用户 id。
+   *
+   * 真实发私信必须带上（WebSocket `toid@goofish`）。会话列表里
+   * `userInfo` / `ownerInfo` 对得上才有；没有就先同步一次。
+   */
+  buyerId?: string;
   status: ConversationStatus;
   intent: Intent;
   /** 买家的出价（若有），单位分 */
@@ -192,6 +211,11 @@ export interface DailyMetric {
 
 export interface ShopSettings {
   shopName: string;
+  /**
+   * 当前登录闲鱼账号的用户 id（cookie `unb`）。
+   * 换号时靠它判断要不要丢掉上一账号的商品 / 会话 / 订单。
+   */
+  accountUserId?: string;
   /** Agent 议价时允许让出的最大折扣（0.15 = 15%） */
   maxDiscount: number;
   /** 承诺发货时效（小时） */
@@ -212,7 +236,7 @@ export type ReadChannel = "mock" | "live";
  * - `mock`：改本地状态，模拟平台反应。演示和开发用，不碰任何真实账号。
  * - `dry_run`：演练。只记录「本来要干什么」，什么都不改，用来在接真实账号
  *   之前观察 Agent 到底想做哪些事。
- * - `live`：真实写入。通道还没实现，选了也会被拒绝。
+ * - `live`：真实写入。回复走闲鱼 IM；擦亮 / 改价 / 下架 / 发货还没接到接口。
  */
 export type WriteMode = "mock" | "dry_run" | "live";
 
@@ -258,8 +282,25 @@ export type ExtractionLayer =
   /** 当前页面上可见的文字，如「86人想要」 */
   | "dom";
 
-/** 观察是在哪种页面上做的。搜索卡片和商详不能混算。 */
-export type ObservationSource = "detail" | "search";
+/**
+ * 观察是在哪种页面上做的。三种页面给的东西不一样，不能混算。
+ *
+ * `detail` 商详：想要、浏览、正文、大图，只有这里有。
+ * `search` 搜索卡：标题、价格。
+ * `shop` 店铺在售列表：标题、价格、还在不在架上；一样没有浏览。
+ */
+export type ObservationSource = "detail" | "search" | "shop";
+
+/** 列表页只能证明价格和在架，证明不了流量。 */
+export function isListSource(source: ObservationSource): boolean {
+  return source === "search" || source === "shop";
+}
+
+/** 一份店铺页快照说的是谁的店。 */
+export interface ParsedShopOrigin {
+  sellerId: string;
+  sellerName?: string;
+}
 
 /** 交付方式只收页面上能看见的，看不出来就是 unknown，不猜。 */
 export type DeliveryTerm = "free_shipping" | "buyer_pays" | "local" | "pickup" | "unknown";
@@ -275,7 +316,7 @@ export const DELIVERY_LABEL: Record<DeliveryTerm, string> = {
 /**
  * 一次观察。
  *
- * `wants` 和 `priceCents` 都是可选的 —— 读不到就是读不到。
+ * `wants`、`views` 和 `priceCents` 都是可选的 —— 读不到就是读不到。
  * `0` 和「没读到」是两回事：把没读到记成 0，下一次读到 86 就会显示「涨了 86」。
  */
 export interface RivalObservation {
@@ -287,6 +328,9 @@ export interface RivalObservation {
   wants?: number;
   /** 这个数是哪一层给的，用来判断可信度 */
   wantsFrom?: ExtractionLayer;
+  /** 累计浏览。搜索卡常常没有，商详才有。 */
+  views?: number;
+  viewsFrom?: ExtractionLayer;
   priceCents?: number;
   priceFrom?: ExtractionLayer;
   delivery: DeliveryTerm;
@@ -320,12 +364,46 @@ export interface RivalListing {
   itemId: string;
   title: string;
   sellerName?: string;
+  /**
+   * 卖家主键。昵称会改、也会重名，认人只能认这个。
+   * 从商详的 sellerDO.userId 或者店铺页 URL 上的 userId= 来。
+   */
+  sellerId?: string;
+  /** 这家店的个人页地址，界面上「进店铺」用 */
+  shopUrl?: string;
   /** 商详回链 */
   url: string;
   addedAt: string;
   alignment: Alignment;
   /** 对齐判定是自动算的还是你亲自改的。人工的不会被自动判定覆盖。 */
   alignmentBy: "auto" | "human";
+  /**
+   * 采集到的商品图，第一张当封面。
+   *
+   * 抽不到就是空数组，不编一张占位图冒充采到了。老状态里可能没有这个字段。
+   */
+  imageUrls?: string[];
+  /**
+   * 商品正文。搜索卡片常常只有标题，商详才有描述。
+   * 抽不到就留空 —— 文案导出那时只用标题。
+   */
+  copy?: string;
+  copyFrom?: ExtractionLayer;
+  /** 最近一次 AI 润色稿。原文不动，润色失败也不覆盖。 */
+  polishedCopy?: string;
+  /**
+   * 你亲自盯的货。监控只看「想要」和「浏览」两条时间线，
+   * 回访清单也优先催这几件。
+   */
+  watched?: boolean;
+  watchedAt?: string;
+  /**
+   * 上一次「试着去开商详」的时间，不管开没开成。
+   *
+   * 和观察记录不是一回事：下架的货永远读不到、也就永远没有观察，
+   * 靠观察排队的话它会把每一轮的名额吃光，后面的货一天都轮不上。
+   */
+  lastDetailTryAt?: string;
   /** 只追加，不覆盖 —— 这一版的全部价值就是历史差值 */
   observations: RivalObservation[];
 }
@@ -335,6 +413,15 @@ export interface ResearchTask {
   name: string;
   keyword: string;
   /**
+   * 关键词选品还是盯一家店。
+   *
+   * 店铺任务装的是这家店的在售全部，不按可比规格筛，也不跑自动清理 ——
+   * 「这家店在卖什么」本来就要看全貌。老状态里没有这个字段，按 keyword 算。
+   */
+  kind?: "keyword" | "shop";
+  /** 店铺任务盯的是谁 */
+  sellerId?: string;
+  /**
    * 统一交付规格，做成可测的关键词而不是一段说明：
    * 命中 `mustExclude` 判为不同款，命中全部 `mustInclude` 判为可比，其余存疑。
    */
@@ -342,6 +429,9 @@ export interface ResearchTask {
   mustExclude: string[];
   /** 对标本店哪件货，用来并排看价格带 */
   linkedListingId?: string;
+  /** 模型根据观察点写的对照分析。数字必须来自材料，编了就弃用。 */
+  llmAnalysis?: string;
+  llmAnalysisAt?: string;
   /** 超过多少小时没观察就进回访清单 */
   revisitHours: number;
   status: "active" | "archived";
@@ -358,6 +448,29 @@ export interface ResearchState {
    * 也能往研究里塞脏数据。它不是平台凭证 —— 既不能登录闲鱼，也动不了你的商品。
    */
   collectorToken?: string;
+  /**
+   * 点一次「看对手」或采集端时，搜索页连翻几页。
+   * 没设就按 3 页。合法范围 1～20。
+   */
+  searchPages?: number;
+  /**
+   * 被标为「监控」的同行，距上一次商详采集多少小时后再采。
+   *
+   * 全局设置，老状态缺失时按 24 小时处理。
+   */
+  watchIntervalHours?: number;
+  /**
+   * 盯住的商品会按全局监控间隔自动采热度。撞风控会先停一阵，不会接着刷。
+   */
+  heatPull?: {
+    lastAttemptAt?: string;
+    lastFillAt?: string;
+    lastOkAt?: string;
+    lastMessage?: string;
+    pauseUntil?: string;
+    /** 撞风控那一刻的登录态版本戳。戳变了说明换了新登录态，暂停可以提前解除。 */
+    pauseLoginStamp?: string;
+  };
 }
 
 /** 一次平台同步拉回来的快照。 */
@@ -375,6 +488,8 @@ export interface PlatformSnapshot {
   notes?: string[];
   /** 平台上的账号显示名，用来把界面上的店铺名换成真的 */
   shopName?: string;
+  /** 这次快照属于哪个闲鱼账号。换号时 merge 会先清掉上一号的店内数据。 */
+  accountUserId?: string;
 }
 
 export interface AppState {

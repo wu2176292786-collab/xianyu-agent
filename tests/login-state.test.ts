@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { describeLoginState, parseLoginState } from "@/lib/adapters/live/login-state";
+import { prepareLoginImport } from "@/lib/adapters/live/credentials";
+import {
+  describeLoginState,
+  parseLoginState,
+  resolveLoginOrigin,
+} from "@/lib/adapters/live/login-state";
 
 describe("登录态解析", () => {
   it("认得出裸 cookie 串", () => {
@@ -141,6 +146,67 @@ describe("登录态解析", () => {
     expect(state.capturedAt).toBe("2026-09-15T03:50:50.040Z");
   });
 
+  it("扩展导出的设备指纹要留下来，打开商详时照着它重建浏览器", () => {
+    const state = parseLoginState({
+      cookie: "unb=1",
+      env: {
+        navigator: {
+          userAgent: "Mozilla/5.0 (Macintosh) Chrome/152.0.0.0",
+          platform: "MacIntel",
+          languages: ["zh-CN", "zh", "en"],
+          hardwareConcurrency: 10,
+          deviceMemory: 8,
+          maxTouchPoints: 0,
+        },
+        screen: { width: 1512, height: 982, devicePixelRatio: 2, colorDepth: 30 },
+        intl: { timeZone: "Asia/Shanghai", locale: "zh-CN" },
+      },
+    })!;
+
+    expect(state.fingerprint).toEqual({
+      platform: "MacIntel",
+      locale: "zh-CN",
+      languages: ["zh-CN", "zh", "en"],
+      timeZone: "Asia/Shanghai",
+      screen: { width: 1512, height: 982 },
+      devicePixelRatio: 2,
+      colorDepth: 30,
+      maxTouchPoints: 0,
+      hardwareConcurrency: 10,
+      deviceMemory: 8,
+    });
+  });
+
+  it("指纹缺字段就留空，不补一个假的", () => {
+    // 老版本扩展只导了时区，屏幕还缺高度
+    const state = parseLoginState({
+      cookie: "unb=1",
+      env: { timezone: "Asia/Shanghai", screen: { width: 1920 } },
+    })!;
+
+    expect(state.fingerprint?.timeZone).toBe("Asia/Shanghai");
+    expect(state.fingerprint?.screen).toBeUndefined();
+    expect(state.fingerprint?.devicePixelRatio).toBeUndefined();
+  });
+
+  it("裸 cookie 串没有指纹可还原", () => {
+    expect(parseLoginState("unb=123; cookie2=abc")?.fingerprint).toBeUndefined();
+  });
+
+  it("存盘再读回来指纹不能丢（落盘走的是同一个解析函数）", () => {
+    const imported = parseLoginState({
+      cookie: "unb=1",
+      env: {
+        navigator: { platform: "MacIntel", maxTouchPoints: 0 },
+        screen: { width: 1512, height: 982, devicePixelRatio: 2 },
+        intl: { timeZone: "Asia/Shanghai", locale: "zh-CN" },
+      },
+    })!;
+
+    const reread = parseLoginState(JSON.stringify(imported))!;
+    expect(reread.fingerprint).toEqual(imported.fingerprint);
+  });
+
   it("UA 埋在 env.navigator 里也能捞出来", () => {
     const state = parseLoginState({
       cookie: "unb=1",
@@ -182,5 +248,39 @@ describe("登录态解析", () => {
 
   it("没导入时如实说未配置", () => {
     expect(describeLoginState(null)).toBe("未配置");
+  });
+
+  it("环境变量优先于本机文件", () => {
+    expect(resolveLoginOrigin({ envCookie: "unb=1; cookie2=a", hasFile: true })).toBe("env");
+    expect(resolveLoginOrigin({ envCookie: "", hasFile: true })).toBe("file");
+    expect(resolveLoginOrigin({ hasFile: false })).toBe("none");
+  });
+
+  it("页面导入认得出扩展 JSON，并补上导出时间", () => {
+    const now = Date.parse("2026-09-15T12:00:00.000Z");
+    const result = prepareLoginImport(
+      JSON.stringify({
+        cookies: [
+          { name: "unb", value: "1" },
+          { name: "cookie2", value: "a" },
+        ],
+        headers: { "User-Agent": "Mozilla/5.0 Test" },
+      }),
+      now,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.cookie).toContain("unb=1");
+    expect(result.state.capturedAt).toBe("2026-09-15T12:00:00.000Z");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("粘过来的不是登录态就失败，不落半残对象", () => {
+    expect(prepareLoginImport("这不是 cookie").ok).toBe(false);
+    const tourist = prepareLoginImport("foo=bar");
+    expect(tourist.ok).toBe(true);
+    if (tourist.ok) {
+      expect(tourist.warnings.some((line) => line.includes("登录态字段"))).toBe(true);
+    }
   });
 });

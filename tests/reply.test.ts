@@ -4,6 +4,7 @@ import {
   classifyIntent,
   draftReply,
   extractOfferCents,
+  isFreshWait,
   lowestQuoteCents,
 } from "@/lib/agent/reply";
 import { createSeedState } from "@/lib/domain/seed";
@@ -57,7 +58,7 @@ function conversation(text: string, overrides: Partial<Conversation> = {}): Conv
 
 describe("时间格式化", () => {
   // 服务端在 UTC、浏览器在别的时区时，同一个时间戳必须渲染成同一个字符串，
-  // 否则 hydration 会直接报错（/inbox 和 /orders 真的踩过）。
+  // 否则 hydration 会直接报错（/inbox 真的踩过）。
   const instant = "2026-01-10T12:00:00.000Z";
   const original = process.env.TZ;
 
@@ -226,5 +227,23 @@ describe("awaitingSellerReply", () => {
     const closed = conversation("再见", { status: "closed" });
     expect(awaitingSellerReply(closed)).toBe(false);
     expect(awaitingSellerReply({ ...closed, status: "needs_reply" })).toBe(true);
+  });
+});
+
+describe("isFreshWait", () => {
+  it("两周内、最后一条还是买家才钉在前面", () => {
+    const hot = conversation("248 可出嘛");
+    const stale = conversation("还在吗", {
+      messages: [
+        {
+          id: "m1",
+          author: "buyer",
+          text: "还在吗",
+          createdAt: new Date(NOW - 40 * 86400_000).toISOString(),
+        },
+      ],
+    });
+    expect(isFreshWait(hot, NOW)).toBe(true);
+    expect(isFreshWait(stale, NOW)).toBe(false);
   });
 });

@@ -72,7 +72,8 @@ export function AutoTickCard({
             </Badge>
           </CardTitle>
           <CardDescription>
-            不点按钮也会按间隔跑。免审批的规则直接执行，其余照样进审批队列。
+            巡检跑在 pi-agent 上：规则先出候选，模型再挑。没配密钥就按规则巡检。
+            免审批的直接执行，其余进审批队列。
           </CardDescription>
         </div>
         <Switch

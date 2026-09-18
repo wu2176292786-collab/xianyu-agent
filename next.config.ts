@@ -21,11 +21,21 @@ function localAddresses(): string[] {
 const nextConfig: NextConfig = {
   // 项目说明统一放在 README 和 docs/plans 里，不需要 Next 再生成一份。
   agentRules: false,
+  serverExternalPackages: [
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "playwright-core",
+    "ws",
+  ],
 
   allowedDevOrigins: ["localhost", "127.0.0.1", "0.0.0.0", "*.local", ...localAddresses()],
 
   // 窄屏下这个浮标会跑到左上角，正好压住汉堡菜单按钮，菜单就点不开了。
   devIndicators: false,
+
+  async redirects() {
+    return [{ source: "/orders", destination: "/", permanent: false }];
+  },
 };
 
 export default nextConfig;

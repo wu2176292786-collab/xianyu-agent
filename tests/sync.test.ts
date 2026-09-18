@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockReader } from "@/lib/adapters/mock-reader";
 import { proposeActions } from "@/lib/agent/engine";
-import { describeMerge, mergeSnapshot } from "@/lib/agent/sync";
+import {
+  adoptAccount,
+  describeMerge,
+  mergeSnapshot,
+  recordShopHeat,
+  shopHeatFromListings,
+} from "@/lib/agent/sync";
 import { createSeedState } from "@/lib/domain/seed";
 import type { AppState, PlatformSnapshot } from "@/lib/domain/types";
 
@@ -119,12 +125,147 @@ describe("mergeSnapshot", () => {
     expect(local.status).toBe("needs_reply");
   });
 
+  it("历史消息进来时丢掉会话列表那条摘要，并补上商品标题", () => {
+    const snapshot = snapshotOf(state);
+    const remote = snapshot.conversations.find((c) => c.id === "C002")!;
+    remote.listingTitle = "追觅S7剃须刀";
+    remote.listingPriceCents = 26800;
+    remote.messages = [
+      {
+        id: "real-1",
+        author: "buyer",
+        text: "还在吗",
+        createdAt: new Date(NOW - 60_000).toISOString(),
+      },
+      {
+        id: "real-2",
+        author: "seller",
+        text: "在的",
+        createdAt: new Date(NOW).toISOString(),
+      },
+    ];
+
+    const before = state.conversations.find((c) => c.id === "C002")!.messages.length;
+    const summary = mergeSnapshot(state, snapshot, NOW);
+    const local = state.conversations.find((c) => c.id === "C002")!;
+
+    expect(local.listingTitle).toBe("追觅S7剃须刀");
+    expect(local.listingPriceCents).toBe(26800);
+    expect(local.messages.every((m) => !m.id.endsWith("-last"))).toBe(true);
+    expect(local.messages.map((m) => m.id)).toEqual(
+      expect.arrayContaining(["real-1", "real-2"]),
+    );
+    expect(local.messages.length).toBeGreaterThanOrEqual(before);
+    expect(summary.newMessages).toBeGreaterThan(0);
+    expect(local.status).toBe("awaiting_buyer");
+  });
+
+  it("会话列表更新的最后一条会覆盖同 id 的摘要", () => {
+    const conversation = state.conversations.find((c) => c.id === "C006")!;
+    conversation.messages = [
+      {
+        id: "C006-last",
+        author: "seller",
+        text: "好的",
+        createdAt: new Date(NOW - 3_600_000).toISOString(),
+      },
+    ];
+    conversation.status = "awaiting_buyer";
+
+    const snapshot = snapshotOf(state);
+    const remote = snapshot.conversations.find((c) => c.id === "C006")!;
+    remote.messages = [
+      {
+        id: "C006-last",
+        author: "buyer",
+        text: "248 可出嘛",
+        createdAt: new Date(NOW).toISOString(),
+      },
+    ];
+    remote.status = "needs_reply";
+
+    const summary = mergeSnapshot(state, snapshot, NOW);
+    const local = state.conversations.find((c) => c.id === "C006")!;
+
+    expect(summary.newMessages).toBe(1);
+    expect(local.messages).toHaveLength(1);
+    expect(local.messages[0]).toMatchObject({
+      id: "C006-last",
+      author: "buyer",
+      text: "248 可出嘛",
+    });
+    expect(local.status).toBe("needs_reply");
+  });
+
+  it("历史页没覆盖到时，也会把更新的最后一条摘要合进来", () => {
+    const conversation = state.conversations.find((c) => c.id === "C002")!;
+    conversation.messages = [
+      {
+        id: "real-1",
+        author: "buyer",
+        text: "还在吗",
+        createdAt: new Date(NOW - 3_600_000).toISOString(),
+      },
+      {
+        id: "real-2",
+        author: "seller",
+        text: "在的",
+        createdAt: new Date(NOW - 3_000_000).toISOString(),
+      },
+    ];
+    conversation.status = "awaiting_buyer";
+
+    const snapshot = snapshotOf(state);
+    const remote = snapshot.conversations.find((c) => c.id === "C002")!;
+    remote.messages = [
+      {
+        id: "C002-last",
+        author: "buyer",
+        text: "248 可出嘛",
+        createdAt: new Date(NOW).toISOString(),
+      },
+    ];
+
+    const summary = mergeSnapshot(state, snapshot, NOW);
+    const local = state.conversations.find((c) => c.id === "C002")!;
+
+    expect(summary.newMessages).toBe(1);
+    expect(local.messages.at(-1)).toMatchObject({
+      author: "buyer",
+      text: "248 可出嘛",
+    });
+    expect(local.status).toBe("needs_reply");
+  });
+
   it("已经有的消息不会重复追加", () => {
     const first = mergeSnapshot(state, snapshotOf(state), NOW);
     const second = mergeSnapshot(state, snapshotOf(state), NOW + 1000);
     expect(first.newMessages).toBe(0);
     expect(second.newMessages).toBe(0);
     expect(state.conversations.find((c) => c.id === "C002")!.messages).toHaveLength(3);
+  });
+
+  it("拉到真实历史后，丢掉只剩摘要的旧会话", () => {
+    const snapshot = snapshotOf(state);
+    state.conversations.push({
+      id: "stale-summary",
+      buyerName: "旧买家",
+      buyerEmoji: "🐟",
+      listingId: "",
+      status: "awaiting_buyer",
+      intent: "other",
+      messages: [
+        {
+          id: "stale-summary-last",
+          author: "seller",
+          text: "在的",
+          createdAt: new Date(NOW).toISOString(),
+        },
+      ],
+    });
+    mergeSnapshot(state, snapshot, NOW);
+    expect(state.conversations.find((conversation) => conversation.id === "stale-summary")).toBeUndefined();
+    expect(state.conversations.find((conversation) => conversation.id === "C002")).toBeDefined();
   });
 
   it("已关闭的会话不会被新消息重新叫醒", () => {
@@ -164,6 +305,37 @@ describe("mergeSnapshot", () => {
     expect(state.listings).toHaveLength(11);
   });
 
+  it("换了闲鱼账号就丢掉上一号的商品、会话和订单", () => {
+    state.settings.accountUserId = "1111";
+    const snapshot = snapshotOf(state);
+    snapshot.accountUserId = "2222";
+    snapshot.shopName = "新号店铺";
+    snapshot.listings = [
+      {
+        ...state.listings[0]!,
+        id: "new-item",
+        title: "新账号的商品",
+      },
+    ];
+    snapshot.conversations = [];
+    snapshot.orders = [];
+
+    mergeSnapshot(state, snapshot, NOW);
+
+    expect(state.settings.accountUserId).toBe("2222");
+    expect(state.settings.shopName).toBe("新号店铺");
+    expect(state.listings.map((listing) => listing.id)).toEqual(["new-item"]);
+    expect(state.conversations).toEqual([]);
+    expect(state.orders).toEqual([]);
+  });
+
+  it("同一账号重新导入登录态不会清空店铺", () => {
+    state.settings.accountUserId = "1111";
+    const before = state.listings.length;
+    expect(adoptAccount(state, "1111")).toBe(false);
+    expect(state.listings).toHaveLength(before);
+  });
+
   it("同步不会动审批队列和活动记录", () => {
     state.actions = [
       {
@@ -189,6 +361,34 @@ describe("mergeSnapshot", () => {
 
   it("没有变化时如实说没有变化", () => {
     expect(describeMerge(mergeSnapshot(state, snapshotOf(state), NOW))).toBe("没有变化");
+  });
+
+  it("总览曝光只加已经同步到浏览的在售商品", () => {
+    expect(
+      shopHeatFromListings([
+        { ...state.listings[0]!, status: "on_sale", views7d: 16, metricsUnknown: false },
+        { ...state.listings[1]!, status: "on_sale", views7d: 6, metricsUnknown: false },
+        { ...state.listings[2]!, status: "on_sale", views7d: 99, metricsUnknown: true },
+        { ...state.listings[3]!, status: "sold_out", views7d: 80, metricsUnknown: false },
+      ]),
+    ).toEqual({ known: 2, views: 22, wants: state.listings[0]!.wants + state.listings[1]!.wants, inquiries: state.listings[0]!.inquiries7d + state.listings[1]!.inquiries7d });
+  });
+
+  it("真实通道同步后会记下今天的店铺曝光", () => {
+    state.channel.read = "live";
+    state.metrics = [];
+    state.listings = state.listings.slice(0, 2).map((listing) => ({
+      ...listing,
+      status: "on_sale" as const,
+      views7d: listing.id === state.listings[0]!.id ? 16 : 6,
+      metricsUnknown: false,
+    }));
+
+    mergeSnapshot(state, snapshotOf(state), NOW);
+
+    expect(state.metrics).toHaveLength(1);
+    expect(state.metrics[0]).toMatchObject({ views: 22 });
+    expect(recordShopHeat(state, NOW)?.views).toBe(22);
   });
 });
 

@@ -543,6 +543,8 @@ function buildResearch(now: number): ResearchState {
     fields: {
       wants?: number;
       wantsFrom?: RivalObservation["wantsFrom"];
+      views?: number;
+      viewsFrom?: RivalObservation["viewsFrom"];
       priceCents?: number;
       delivery: RivalObservation["delivery"];
       excerpt?: string;
@@ -550,6 +552,7 @@ function buildResearch(now: number): ResearchState {
   ): RivalObservation => {
     const missing: string[] = [];
     if (fields.wants === undefined) missing.push("wants");
+    if (fields.views === undefined) missing.push("views");
     if (fields.priceCents === undefined) missing.push("price");
     if (fields.delivery === "unknown") missing.push("delivery");
     return {
@@ -558,6 +561,8 @@ function buildResearch(now: number): ResearchState {
       source: "detail",
       wants: fields.wants,
       wantsFrom: fields.wantsFrom,
+      views: fields.views,
+      viewsFrom: fields.viewsFrom,
       priceCents: fields.priceCents,
       priceFrom: fields.priceCents === undefined ? undefined : "api",
       delivery: fields.delivery,
@@ -578,16 +583,27 @@ function buildResearch(now: number): ResearchState {
       addedAt: iso(now, -6 * DAY),
       alignment: "comparable",
       alignmentBy: "auto",
+      imageUrls: [
+        "https://img.alicdn.com/bao/uploaded/i1/O1CN01demoSwitch.jpg",
+      ],
+      copy: "自用一年，原盒全套，带塞尔达卡带，功能正常，走闲鱼包邮。",
+      copyFrom: "api",
+      watched: true,
+      watchedAt: iso(now, -6 * HOUR),
       observations: [
         detail("OB001", 54, "812345001", {
           wants: 82,
           wantsFrom: "api",
+          views: 1112,
+          viewsFrom: "api",
           priceCents: 169900,
           delivery: "free_shipping",
         }),
         detail("OB002", 6, "812345001", {
           wants: 93,
           wantsFrom: "api",
+          views: 1192,
+          viewsFrom: "api",
           priceCents: 169900,
           delivery: "free_shipping",
         }),
@@ -681,7 +697,13 @@ function buildResearch(now: number): ResearchState {
     },
   ];
 
-  return { tasks: [task], rivals, collectorToken: newCollectorToken() };
+  return {
+    tasks: [task],
+    rivals,
+    collectorToken: newCollectorToken(),
+    searchPages: 3,
+    watchIntervalHours: 24,
+  };
 }
 
 export function createSeedState(now = Date.now()): AppState {

@@ -29,6 +29,10 @@
 
 ![行动队列](docs/screenshots/queue.png)
 
+买家消息按待回复优先排序，店主可以先让 Agent 起草，再自行确认、编辑和发送：
+
+![消息与回复草稿](docs/screenshots/inbox.png)
+
 规则的开关、参数、是否需要人工审批，以及自动巡检的间隔都在「自动化」页面里改：
 
 ![自动化](docs/screenshots/automations.png)

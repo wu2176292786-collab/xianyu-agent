@@ -6,16 +6,27 @@
  *
  * 用 playwright-core 驱动系统里已有的 Chrome，不下载额外的浏览器。
  */
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright-core";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
-const CHROME =
-  process.env.CHROME_PATH ??
-  (process.platform === "darwin"
-    ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    : "/usr/bin/google-chrome-stable");
+const DEFAULT_CHROME_PATHS =
+  process.platform === "darwin"
+    ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    : process.platform === "win32"
+      ? [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+      : ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
+const CHROME = [process.env.CHROME_PATH, ...DEFAULT_CHROME_PATHS].find(
+  (candidate) => Boolean(candidate) && existsSync(candidate),
+);
+if (!CHROME) {
+  throw new Error("找不到 Chrome；请设置 CHROME_PATH 为 Chrome 可执行文件路径。");
+}
 const results = [];
 let failures = 0;
 

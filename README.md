@@ -49,6 +49,14 @@
 node -v    # 低于 v22.12 的话先升级，比如 nvm install 22 && nvm use 22
 ```
 
+macOS 和 Windows 均可运行。同行浏览器采集、截图和 E2E 测试会自动寻找常见的
+Chrome 安装位置；若使用便携版或非默认安装位置，可设置 `CHROME_PATH` 覆盖。例如在
+Windows PowerShell 中：
+
+```powershell
+$env:CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
 然后在**项目目录**里（不是家目录）跑：
 
 ```bash

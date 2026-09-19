@@ -5,15 +5,29 @@ import { clampSearchPages, cookiesFromHeader } from "./search-pager";
 import { SEARCH_PAGE_GAP_MS } from "./scout";
 import { parsePageSnapshot, type PageSnapshot, type ParseResult } from "./snapshot";
 
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome-stable",
-  "/usr/bin/google-chrome",
-].filter((path): path is string => Boolean(path));
+/**
+ * 常见 Chrome 可执行文件位置。`CHROME_PATH` 永远优先，方便便携版、企业安装或
+ * 非默认磁盘；其余位置覆盖 macOS、Windows 和 Linux 的默认安装。
+ */
+export function chromePathCandidates(
+  platform = process.platform,
+  configuredPath = process.env.CHROME_PATH,
+): string[] {
+  const defaults =
+    platform === "darwin"
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : platform === "win32"
+        ? [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          ]
+        : ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
+
+  return [configuredPath, ...defaults].filter((path): path is string => Boolean(path));
+}
 
 export function findChromePath(): string | undefined {
-  return CHROME_CANDIDATES.find((path) => existsSync(path));
+  return chromePathCandidates().find((path) => existsSync(path));
 }
 
 /**

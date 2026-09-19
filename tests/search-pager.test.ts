@@ -5,6 +5,24 @@ import {
   isNextPageLabel,
   pickNextPageControl,
 } from "@/lib/research/search-pager";
+import { chromePathCandidates } from "@/lib/research/browse-search";
+
+describe("Chrome 路径", () => {
+  it("覆盖 macOS、Windows 和 Linux 的常见安装位置，且允许手动覆盖", () => {
+    expect(chromePathCandidates("darwin", undefined)).toContain(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    );
+    expect(chromePathCandidates("win32", undefined)).toEqual([
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    ]);
+    expect(chromePathCandidates("linux", "/custom/chrome")).toEqual([
+      "/custom/chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/google-chrome",
+    ]);
+  });
+});
 
 describe("搜索页数", () => {
   it("缺省按 3 页，超出范围就夹住", () => {

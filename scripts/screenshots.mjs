@@ -1,12 +1,28 @@
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright-core";
 
 // 默认对着生产构建截图（`npm run start`），开发模式左下角会多一个 Next 调试浮标。
 const BASE = process.env.BASE ?? "http://127.0.0.1:43117";
+const DEFAULT_CHROME_PATHS =
+  process.platform === "darwin"
+    ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    : process.platform === "win32"
+      ? [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+      : ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
+const CHROME = [process.env.CHROME_PATH, ...DEFAULT_CHROME_PATHS].find(
+  (candidate) => Boolean(candidate) && existsSync(candidate),
+);
+if (!CHROME) {
+  throw new Error("找不到 Chrome；请设置 CHROME_PATH 为 Chrome 可执行文件路径。");
+}
 await mkdir("docs/screenshots", { recursive: true });
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome-stable",
+  executablePath: CHROME,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });
 const page = await browser.newPage({
